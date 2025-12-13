@@ -79,7 +79,7 @@ with st.sidebar:
         index=0,
     )
 
-    diversity_attempts = st.number_input("分散最大化の試行回数", min_value=1, max_value=50, value=1, step=1)
+    diversity_attempts = st.number_input("分散最大化の試行回数", min_value=1, max_value=100, value=1, step=1)
 
     allow_court_gaps = st.checkbox("途中ラウンドの空きコートを許容", value=False)
 
