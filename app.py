@@ -91,10 +91,18 @@ with st.sidebar:
     st.divider()
     st.header("編集後Excel→HTML再生成")
     st.caption("編集したスケジュールExcel（対戦表/ペア一覧）をアップロードして、HTMLを作り直します。")
-    st.warning("個人情報対策: ここで生成するHTMLは選手名（氏名）を表示しません（ペア名のみ）。")
     edited_schedule = st.file_uploader("編集後スケジュールExcel (.xlsx)", type=["xlsx"], key="edited_schedule_xlsx")
+    regen_include_members = st.checkbox(
+        "HTMLに選手名（氏名）を含める",
+        value=False,
+        help="ONにすると個人情報が含まれます。サーバ側で処理される点に注意してください。",
+    )
+    if regen_include_members:
+        st.warning("注意: 選手名（氏名）を含むHTMLを生成します。公開URLでの配布は避け、配布先を限定してください。")
+    else:
+        st.info("個人情報対策: 選手名（氏名）を表示しません（ペア名のみ）。")
     regen_passcode = st.text_input("再生成HTMLのパスコード（任意）", value="", type="password", key="regen_html_pass")
-    regen = st.button("HTMLを再生成（個人情報なし）", use_container_width=True)
+    regen = st.button("HTMLを再生成", use_container_width=True)
 
 
 def _read_bytes(p: Path) -> bytes:
@@ -108,9 +116,10 @@ def _set_last_outputs(*, excel_name: str, excel_bytes: bytes, html_name: str | N
     st.session_state.last_html_bytes = html_bytes
 
 
-def _set_regen_html(*, html_name: str, html_bytes: bytes) -> None:
+def _set_regen_html(*, html_name: str, html_bytes: bytes, include_members: bool) -> None:
     st.session_state.regen_html_name = html_name
     st.session_state.regen_html_bytes = html_bytes
+    st.session_state.regen_include_members = include_members
 
 
 if run:
@@ -225,13 +234,16 @@ if 'regen' in locals() and regen:
                     html_passcode=(str(regen_passcode) or None),
                     start_time_hhmm=str(start_time),
                     round_minutes=int(round_minutes),
-                    include_members=False,
+                    include_members=bool(regen_include_members),
                 )
                 html_bytes = _read_bytes(out_path)
 
-            _set_regen_html(html_name=out_name, html_bytes=html_bytes)
+            _set_regen_html(html_name=out_name, html_bytes=html_bytes, include_members=bool(regen_include_members))
             status.update(label="再生成完了", state="complete", expanded=False)
-            st.success("HTMLを再生成しました（個人情報なし）。下のダウンロードから取得できます。")
+            if regen_include_members:
+                st.success("HTMLを再生成しました（選手名あり）。下のダウンロードから取得できます。")
+            else:
+                st.success("HTMLを再生成しました（個人情報なし）。下のダウンロードから取得できます。")
         except Exception as e:
             status.update(label="失敗", state="error")
             st.exception(e)
@@ -266,7 +278,10 @@ if "last_excel_bytes" in st.session_state:
 
 
 if st.session_state.get("regen_html_bytes") and st.session_state.get("regen_html_name"):
-    st.markdown("### 再生成HTML（個人情報なし）")
+    if st.session_state.get("regen_include_members"):
+        st.markdown("### 再生成HTML（選手名あり）")
+    else:
+        st.markdown("### 再生成HTML（個人情報なし）")
     st.download_button(
         "再生成HTMLをダウンロード",
         data=st.session_state.regen_html_bytes,
