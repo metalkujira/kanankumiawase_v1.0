@@ -3706,11 +3706,18 @@ def write_to_excel_like_summary(
     wb.save(output_path)
 
 
-def write_personal_schedule_html(matches: List[Match], teams: List[Team], output_path: str,
-                                 num_rounds: int = 23, courts: int = 15,
-                                 html_passcode: str | None = None,
-                                 start_time_hhmm: str = DEFAULT_START_TIME_HHMM,
-                                 round_minutes: int = DEFAULT_ROUND_MINUTES) -> None:
+def write_personal_schedule_html(
+    matches: List[Match],
+    teams: List[Team],
+    output_path: str,
+    num_rounds: int = 23,
+    courts: int = 15,
+    html_passcode: str | None = None,
+    start_time_hhmm: str = DEFAULT_START_TIME_HHMM,
+    round_minutes: int = DEFAULT_ROUND_MINUTES,
+    *,
+    include_members: bool = True,
+) -> None:
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     header_rounds = [f"R{r}" for r in range(1, num_rounds + 1)]
@@ -3738,7 +3745,7 @@ def write_personal_schedule_html(matches: List[Match], teams: List[Team], output
         if not slot:
             return ""
         opp = opp_lookup.get((rnd, team_name))
-        opp_members = opp_members_lookup.get((rnd, team_name))
+        opp_members = opp_members_lookup.get((rnd, team_name)) if include_members else ""
         if opp and opp_members:
             return f"C{slot[0]} {escape(opp)} / {escape(opp_members)}<br><small>{slot[1]}</small>"
         if opp:
@@ -3803,7 +3810,12 @@ def write_personal_schedule_html(matches: List[Match], teams: List[Team], output
     def normalize_name(value: str) -> str:
         return value.casefold() if isinstance(value, str) else ""
 
-    short_headers = ["試合", "コート", "時間", "ペア名", "選手名", "相手ペア名", "相手選手名"]
+    short_headers = ["試合", "コート", "時間", "ペア名"]
+    if include_members:
+        short_headers += ["選手名"]
+    short_headers += ["相手ペア名"]
+    if include_members:
+        short_headers += ["相手選手名"]
     short_rows_team = [
         {
             "cells": [
@@ -3811,9 +3823,9 @@ def write_personal_schedule_html(matches: List[Match], teams: List[Team], output
                 (str(entry["court"]), False),
                 (entry["time"], False),
                 (entry["pair"], False),
-                (entry["members"], False),
+                *([(entry["members"], False)] if include_members else []),
                 (entry["opp"], False),
-                (entry["opp_members"], False),
+                *([(entry["opp_members"], False)] if include_members else []),
             ],
             "meta": {
                 "team": entry["pair"],
@@ -3831,9 +3843,9 @@ def write_personal_schedule_html(matches: List[Match], teams: List[Team], output
                 (str(entry["court"]), False),
                 (entry["time"], False),
                 (entry["pair"], False),
-                (entry["members"], False),
+                *([(entry["members"], False)] if include_members else []),
                 (entry["opp"], False),
-                (entry["opp_members"], False),
+                *([(entry["opp_members"], False)] if include_members else []),
             ],
             "meta": {
                 "team": entry["pair"],
@@ -3844,12 +3856,15 @@ def write_personal_schedule_html(matches: List[Match], teams: List[Team], output
         for entry in sorted(short_entries, key=lambda e: (e["round"], e["court"], normalize_name(e["pair"])) )
     ]
 
-    personal_headers = ["ペア名", "選手名", *header_rounds]
+    personal_headers = ["ペア名"]
+    if include_members:
+        personal_headers += ["選手名"]
+    personal_headers += [*header_rounds]
     personal_rows: list[dict[str, Any]] = []
     for team in sorted(teams, key=alphabetical_team_key):
         row: list[tuple[str, bool]] = [
             (team.name, False),
-            (team.members, False),
+            *([(team.members, False)] if include_members else []),
         ]
         for rnd in range(1, num_rounds + 1):
             val = cell_value(team.name, rnd)
@@ -3865,7 +3880,10 @@ def write_personal_schedule_html(matches: List[Match], teams: List[Team], output
 
     team_filter_options: list[tuple[str, str]] = []
     for team in sorted(teams, key=alphabetical_team_key):
-        label = f"{team.name}（{team.members}）" if team.members else team.name
+        if include_members and team.members:
+            label = f"{team.name}（{team.members}）"
+        else:
+            label = team.name
         team_filter_options.append((team.name, label))
     keyword_candidates = sorted({t.name for t in teams if t.name}, key=lambda n: n.casefold())
     club_options = sorted({t.group for t in teams if t.group}, key=lambda g: g.casefold())
@@ -4650,6 +4668,7 @@ def html_from_xlsx(
     html_passcode: str = typer.Option("", help="HTMLの簡易ロック用パスコード（注意: 完全な暗号化ではありません）"),
     start_time: str = typer.Option(DEFAULT_START_TIME_HHMM, help="開始時刻 (HH:MM) ※Excelに開始が無い場合の補助"),
     round_minutes: int = typer.Option(DEFAULT_ROUND_MINUTES, help="1ラウンドの時間（分） ※Excelに開始が無い場合の補助"),
+    include_members: bool = typer.Option(False, help="HTMLに選手名（氏名）を含める。通常はOFF推奨"),
 ):
     if round_minutes <= 0:
         raise typer.BadParameter("round_minutes は 1 以上を指定してください")
@@ -4680,6 +4699,7 @@ def html_from_xlsx(
         html_passcode=html_passcode or None,
         start_time_hhmm=start_time,
         round_minutes=int(round_minutes),
+        include_members=bool(include_members),
     )
     print(f"HTML出力: {out_path}")
 

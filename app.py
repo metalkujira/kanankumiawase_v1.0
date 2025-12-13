@@ -65,7 +65,7 @@ with st.sidebar:
         use_container_width=True,
     )
 
-    uploaded = st.file_uploader("チーム一覧Excel (.xlsx)", type=["xlsx"]) 
+    uploaded = st.file_uploader("チーム一覧Excel (.xlsx)", type=["xlsx"], key="teams_xlsx") 
 
     courts = st.number_input("コート数", min_value=1, max_value=60, value=15, step=1)
     num_rounds = st.number_input("ラウンド数", min_value=1, max_value=200, value=23, step=1)
@@ -88,6 +88,14 @@ with st.sidebar:
 
     run = st.button("生成", type="primary", use_container_width=True)
 
+    st.divider()
+    st.header("編集後Excel→HTML再生成")
+    st.caption("編集したスケジュールExcel（対戦表/ペア一覧）をアップロードして、HTMLを作り直します。")
+    st.warning("個人情報対策: ここで生成するHTMLは選手名（氏名）を表示しません（ペア名のみ）。")
+    edited_schedule = st.file_uploader("編集後スケジュールExcel (.xlsx)", type=["xlsx"], key="edited_schedule_xlsx")
+    regen_passcode = st.text_input("再生成HTMLのパスコード（任意）", value="", type="password", key="regen_html_pass")
+    regen = st.button("HTMLを再生成（個人情報なし）", use_container_width=True)
+
 
 def _read_bytes(p: Path) -> bytes:
     return p.read_bytes()
@@ -98,6 +106,11 @@ def _set_last_outputs(*, excel_name: str, excel_bytes: bytes, html_name: str | N
     st.session_state.last_excel_bytes = excel_bytes
     st.session_state.last_html_name = html_name
     st.session_state.last_html_bytes = html_bytes
+
+
+def _set_regen_html(*, html_name: str, html_bytes: bytes) -> None:
+    st.session_state.regen_html_name = html_name
+    st.session_state.regen_html_bytes = html_bytes
 
 
 if run:
@@ -133,28 +146,92 @@ if run:
 
                 # Find generated files (timestamped).
                 xlsx_files = sorted(tmp_dir.glob("schedule_*.xlsx"))
-                html_files = sorted(tmp_dir.glob("schedule_*.html"))
 
                 if not xlsx_files:
                     raise RuntimeError("Excel出力が見つかりませんでした")
 
                 xlsx_path = xlsx_files[-1]
-                html_path = html_files[-1] if html_files else None
+
+                # Streamlitでは個人情報対策として、HTMLは常に「選手名なし」で再生成する。
+                safe_html_path = xlsx_path.with_suffix(".html")
+                matches, teams, inferred_rounds, inferred_courts = scheduler.load_schedule_from_xlsx(
+                    str(xlsx_path),
+                    fallback_start_time_hhmm=str(start_time),
+                    fallback_round_minutes=int(round_minutes),
+                )
+                scheduler.write_personal_schedule_html(
+                    matches,
+                    teams,
+                    str(safe_html_path),
+                    num_rounds=int(inferred_rounds),
+                    courts=int(inferred_courts),
+                    html_passcode=(str(html_passcode) or None),
+                    start_time_hhmm=str(start_time),
+                    round_minutes=int(round_minutes),
+                    include_members=False,
+                )
 
                 excel_bytes = _read_bytes(xlsx_path)
-                html_bytes = _read_bytes(html_path) if html_path else b""
+                html_bytes = _read_bytes(safe_html_path)
 
             _set_last_outputs(
                 excel_name=xlsx_path.name,
                 excel_bytes=excel_bytes,
-                html_name=(html_path.name if html_path is not None else None),
-                html_bytes=(html_bytes if html_path is not None else None),
+                html_name=safe_html_path.name,
+                html_bytes=html_bytes,
             )
 
             status.update(label="生成完了", state="complete", expanded=False)
 
             st.success("生成しました。右側のダウンロードからExcel/HTMLを取得できます。")
 
+        except Exception as e:
+            status.update(label="失敗", state="error")
+            st.exception(e)
+
+
+if "edited_schedule_xlsx" in st.session_state and st.session_state.get("edited_schedule_xlsx") is not None:
+    # no-op placeholder (Streamlit stores uploader state);
+    # actual handling is done on button click below.
+    pass
+
+
+if 'regen' in locals() and regen:
+    if edited_schedule is None:
+        st.error("編集後スケジュールExcelをアップロードしてください")
+        st.stop()
+
+    with st.status("HTML再生成中…", expanded=True) as status:
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                tmp_dir = Path(td)
+                input_path = tmp_dir / "edited_schedule.xlsx"
+                input_path.write_bytes(edited_schedule.getvalue())
+
+                matches, teams, inferred_rounds, inferred_courts = scheduler.load_schedule_from_xlsx(
+                    str(input_path),
+                    fallback_start_time_hhmm=str(start_time),
+                    fallback_round_minutes=int(round_minutes),
+                )
+
+                out_name = Path(edited_schedule.name).with_suffix(".html").name if edited_schedule.name else "schedule.html"
+                out_path = tmp_dir / out_name
+                scheduler.write_personal_schedule_html(
+                    matches,
+                    teams,
+                    str(out_path),
+                    num_rounds=int(inferred_rounds),
+                    courts=int(inferred_courts),
+                    html_passcode=(str(regen_passcode) or None),
+                    start_time_hhmm=str(start_time),
+                    round_minutes=int(round_minutes),
+                    include_members=False,
+                )
+                html_bytes = _read_bytes(out_path)
+
+            _set_regen_html(html_name=out_name, html_bytes=html_bytes)
+            status.update(label="再生成完了", state="complete", expanded=False)
+            st.success("HTMLを再生成しました（個人情報なし）。下のダウンロードから取得できます。")
         except Exception as e:
             status.update(label="失敗", state="error")
             st.exception(e)
@@ -186,3 +263,14 @@ if "last_excel_bytes" in st.session_state:
 
     st.divider()
     st.caption("注意: HTMLの簡易ロックは暗号化ではありません。配布先は限定してください。")
+
+
+if st.session_state.get("regen_html_bytes") and st.session_state.get("regen_html_name"):
+    st.markdown("### 再生成HTML（個人情報なし）")
+    st.download_button(
+        "再生成HTMLをダウンロード",
+        data=st.session_state.regen_html_bytes,
+        file_name=st.session_state.regen_html_name,
+        mime="text/html",
+        use_container_width=True,
+    )
