@@ -2452,7 +2452,6 @@ def reduce_back_to_back(matches: List[Match], num_rounds: int, courts: int,
     if not matches:
         return matches
 
-    base_time = datetime(2025, 11, 26, 12, 50)
     round_matches: Dict[int, List[Match]] = {r: [] for r in range(1, num_rounds + 1)}
     round_courts: Dict[int, Set[int]] = {r: set() for r in range(1, num_rounds + 1)}
     round_names: Dict[int, Set[str]] = {r: set() for r in range(1, num_rounds + 1)}
@@ -2573,7 +2572,7 @@ def reduce_back_to_back(matches: List[Match], num_rounds: int, courts: int,
 
         match.round_num = target_round
         match.court = new_court
-        match.start_time = base_time + timedelta(minutes=13 * (target_round - 1))
+        # Time is applied later via apply_round_times().
         round_matches[target_round].append(match)
         round_courts[target_round].add(new_court)
         round_names[target_round].add(match.team1.name)
@@ -2810,7 +2809,6 @@ def eliminate_mid_session_court_gaps(matches: List[Match], num_rounds: int, cour
         round_names[match.round_num].add(match.team2.name)
         round_courts[match.round_num].add(match.court)
 
-    base_time = datetime(2025, 11, 26, 12, 50)
     for r in range(1, num_rounds):
         while len(round_matches[r]) < courts:
             available_courts = [c for c in range(1, courts + 1) if c not in round_courts[r]]
@@ -2831,7 +2829,7 @@ def eliminate_mid_session_court_gaps(matches: List[Match], num_rounds: int, cour
                     new_court = available_courts.pop(0)
                     match.round_num = r
                     match.court = new_court
-                    match.start_time = base_time + timedelta(minutes=13 * (r - 1))
+                    # Time is applied later via apply_round_times().
                     round_matches[r].append(match)
                     round_names[r].add(match.team1.name)
                     round_names[r].add(match.team2.name)
@@ -2862,7 +2860,6 @@ def ensure_round_one_full(matches: List[Match], num_rounds: int, courts: int) ->
     if len(round_one) >= courts:
         return matches
 
-    base_time = datetime(2025, 11, 26, 12, 50)
     used_names: Set[str] = set()
     used_courts: Set[int] = set()
     for match in round_one:
@@ -2884,7 +2881,7 @@ def ensure_round_one_full(matches: List[Match], num_rounds: int, courts: int) ->
             target_court = available_courts.pop(0)
             match.round_num = 1
             match.court = target_court
-            match.start_time = base_time
+            # Time is applied later via apply_round_times().
             round_lookup[1].append(match)
             used_names.add(match.team1.name)
             used_names.add(match.team2.name)
@@ -4333,7 +4330,7 @@ def generate_schedule(
     diversity_attempts: int = typer.Option(1, help="分散最大化の試行回数"),
     graph_mode: bool = typer.Option(True, help="グラフ構築モードを使用 (必須条件安定化)"),
     allow_court_gaps: bool = typer.Option(False, help="途中ラウンドの空きコートを許容するか（審判運用のため通常はOFF推奨）"),
-    max_consecutive: int = typer.Option(0, help="最大連戦数。0で制限なし。例:2（3連戦を避ける）"),
+    max_consecutive: int = typer.Option(2, help="最大連戦数（2推奨）。満たせない場合は自動で3に緩和（2 or 3）"),
     matches_per_team: int = typer.Option(0, help="各ペアの試合数。0で自動（全員同数を最優先）。例: 6"),
     html_passcode: str = typer.Option("", help="HTMLの簡易ロック用パスコード（注意: 完全な暗号化ではありません）"),
     start_time: str = typer.Option(DEFAULT_START_TIME_HHMM, help="開始時刻 (HH:MM)"),
@@ -4351,12 +4348,8 @@ def generate_schedule(
     else:
         TARGET_MATCHES_PER_TEAM = matches_per_team
 
-    if max_consecutive < 0:
-        raise typer.BadParameter("max_consecutive は 0 以上を指定してください")
-
-    effective_allow_court_gaps = bool(allow_court_gaps) or (max_consecutive > 0)
-    if (max_consecutive > 0) and (not allow_court_gaps):
-        print("注意: max_consecutive を指定したため、連戦削減のため途中ラウンドの空きコートを許容して最適化します")
+    if max_consecutive not in (2, 3):
+        raise typer.BadParameter("max_consecutive は 2 または 3 を指定してください")
 
     capacity = num_rounds * courts
     expected_matches_total = expected_total_matches(len(probe_teams), TARGET_MATCHES_PER_TEAM)
@@ -4416,12 +4409,48 @@ def generate_schedule(
                     print(f"修復後も残る衝突: {len(after)}")
             # Ensure we never exceed physical court capacity even if collision repair is imperfect.
             matches = normalize_round_capacity(matches, num_rounds, courts)
-            if not effective_allow_court_gaps:
+            if not allow_court_gaps:
                 matches = eliminate_mid_session_court_gaps(matches, num_rounds, courts)
             matches = ensure_round_one_full(matches, num_rounds, courts)
             matches = compact_court_usage(matches, num_rounds, courts)
-            if max_consecutive > 0:
-                matches = reduce_max_consecutive_streak(matches, num_rounds, courts, max_consecutive=max_consecutive)
+
+            def _max_team_streak(ms: List[Match]) -> int:
+                rounds_map: Dict[str, List[int]] = defaultdict(list)
+                for m in ms:
+                    rounds_map[m.team1.name].append(m.round_num)
+                    rounds_map[m.team2.name].append(m.round_num)
+                best = 0
+                for rs in rounds_map.values():
+                    if not rs:
+                        continue
+                    sr = sorted(rs)
+                    cur = 1
+                    mx = 1
+                    for i in range(1, len(sr)):
+                        if sr[i] == sr[i - 1] + 1:
+                            cur += 1
+                            mx = max(mx, cur)
+                        else:
+                            cur = 1
+                    best = max(best, mx)
+                return best
+
+            def _consecutive_optimize(ms: List[Match], limit: int) -> List[Match]:
+                for _ in range(3):
+                    if _max_team_streak(ms) <= limit:
+                        break
+                    ms = reduce_max_consecutive_streak(ms, num_rounds, courts, max_consecutive=limit)
+                    ms = normalize_round_capacity(ms, num_rounds, courts)
+                    if not allow_court_gaps:
+                        ms = eliminate_mid_session_court_gaps(ms, num_rounds, courts)
+                    ms = ensure_round_one_full(ms, num_rounds, courts)
+                    ms = compact_court_usage(ms, num_rounds, courts)
+                return ms
+
+            matches = _consecutive_optimize(matches, limit=max_consecutive)
+            if max_consecutive == 2 and _max_team_streak(matches) > 2:
+                print("連戦上限2が満たせないため、連戦上限3に緩和します")
+                matches = _consecutive_optimize(matches, limit=3)
         # 条件確認
         if any(t.matches != TARGET_MATCHES_PER_TEAM for t in teams):
             print(f"試行 {attempt}: 未達ペアあり -> スキップ")
