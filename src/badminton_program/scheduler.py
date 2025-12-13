@@ -4057,8 +4057,8 @@ td.sticky-col {background: #fff;}
 #match-matrix .match-col {left: 0; min-width: var(--match-col-width); max-width: var(--match-col-width);}
 #short-team .round-col, #short-round .round-col {left: 0; min-width: var(--short-round-width); max-width: var(--short-round-width);}
 #short-team .court-col, #short-round .court-col {left: var(--short-round-width); min-width: var(--short-court-width); max-width: var(--short-court-width);}
-#personal-schedule .team-col {left: 0; min-width: var(--personal-team-width); max-width: var(--personal-team-width);}
-#personal-schedule .member-col {left: var(--personal-team-width); min-width: var(--personal-member-width); max-width: var(--personal-member-width);}
+#personal-schedule .team-col {left: 0; width: var(--personal-team-width); min-width: var(--personal-team-width); max-width: var(--personal-team-width);}
+#personal-schedule .member-col {left: var(--personal-team-width); width: var(--personal-member-width); min-width: var(--personal-member-width); max-width: var(--personal-member-width);}
 #personal-schedule .team-col, #personal-schedule .member-col {white-space: normal; word-break: break-word; overflow-wrap: anywhere; line-height: 1.15;}
 @media (max-width: 768px) {
     :root {
@@ -4132,7 +4132,7 @@ td.sticky-col {background: #fff;}
             enable_club_root_filter=True,
             club_root_options=club_root_options,
             keyword_options=keyword_candidates,
-            sticky_columns={0: ["team-col"], 1: ["member-col"]},
+            sticky_columns=({0: ["team-col"], 1: ["member-col"]} if include_members else {0: ["team-col"]}),
         )
         render_table(
             fh,
