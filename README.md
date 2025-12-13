@@ -62,6 +62,8 @@ bsched --input-file "チームリスト.xlsx" --output-file "schedule.xlsx" --co
 - `pyproject.toml` の `license` は現在 `Proprietary` になっています。公開するなら、意図に合わせてライセンス表記の見直しが必要です。
 - 個人情報が入る可能性があるため、入力Excelや出力HTML/Excelをそのままリポジトリに含めない運用を推奨します（`.gitignore`推奨）。
 
+補足: GitHubを `Private` にすると、招待したメンバー以外は見られません（=「みんなに公開」はできません）。
+
 ## GitHub上で入力して実行（Actions）
 
 GitHubの画面から「コート数・ラウンド数・各ペア試合数」などを入力して実行し、生成されたExcel/HTMLをArtifactsからダウンロードできます。
@@ -70,3 +72,20 @@ GitHubの画面から「コート数・ラウンド数・各ペア試合数」�
 2. GitHub → `Actions` → `Generate Schedule` → `Run workflow`
 3. 入力欄に `courts`, `num_rounds`, `matches_per_team` などを入れて実行
 4. 実行結果ページの `Artifacts` から `schedule-output` をダウンロード
+
+## Streamlitで回す（ブラウザUI）
+
+このリポジトリには簡易Streamlitアプリ [app.py](app.py) を含めています。
+
+ローカル起動:
+
+```powershell
+pip install -e .
+streamlit run app.py
+```
+
+デプロイ:
+- Streamlit Community Cloudは基本的に「GitHubのPublicリポジトリ」が前提です。
+- Privateのまま使うなら、Streamlit Cloudの有料プランか、自前サーバー/自PCでの起動が現実的です。
+
+HTMLはサーバー上で公開せず、生成後にダウンロードさせる運用を推奨します（簡易ロックは暗号化ではありません）。
