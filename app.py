@@ -79,7 +79,8 @@ with st.sidebar:
         index=0,
     )
 
-    diversity_attempts = st.number_input("分散最大化の試行回数", min_value=1, max_value=200, value=50, step=1)
+    diversity_attempts = st.number_input("分散最大化の試行回数（最小100 / 最大300）", min_value=100, max_value=300, value=100, step=1)
+    st.caption("注: 300回に近づけるほど改善する可能性はありますが、計算時間が大きく伸びることがあります。")
 
     allow_court_gaps = st.checkbox("途中ラウンドの空きコートを許容", value=False)
 
