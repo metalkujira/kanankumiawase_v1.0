@@ -1,28 +1,82 @@
-import pandas as pd
+"""Create a scheduler input Excel (チームリスト.xlsx) from an existing workbook.
+
+This script is intentionally generic so it can be shared publicly.
+
+Usage (PowerShell):
+  python create_team_list.py --input-file "source.xlsm" --output-file "チームリスト.xlsx"
+"""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
 import openpyxl
+import pandas as pd
 
-# Load the Excel file
-file_path = r"c:\Users\User\OneDrive\03=personal(香港)\31 badminton　対戦プログラム\251122　集計結果 final 36th 交流会 - vf.xlsm"
 
-# Read the 'リスト' sheet
-wb = openpyxl.load_workbook(file_path, read_only=True)
-sheet = wb['リスト']
-data = list(sheet.values)
-df = pd.DataFrame(data[1:], columns=data[0])
-valid_teams = df.dropna(subset=[df.columns[0]])
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Create チームリスト.xlsx from a source workbook")
+    parser.add_argument(
+        "--input-file",
+        type=str,
+        default="source.xlsm",
+        help="Input workbook path (.xlsx/.xlsm). Default: source.xlsm",
+    )
+    parser.add_argument(
+        "--output-file",
+        type=str,
+        default="チームリスト.xlsx",
+        help="Output .xlsx path. Default: チームリスト.xlsx",
+    )
+    parser.add_argument(
+        "--sheet",
+        type=str,
+        default="リスト",
+        help="Sheet name to read. Default: リスト",
+    )
+    args = parser.parse_args()
 
-# Create team list Excel
-wb_new = openpyxl.Workbook()
-ws = wb_new.active
-ws.title = "チームリスト"
-ws.append(["ペア名", "氏名", "レベル", "グループ"])
+    input_path = Path(args.input_file)
+    output_path = Path(args.output_file)
 
-for _, row in valid_teams.iterrows():
-    name = row['ペア名 ↓値ばりで記入']
-    members = row['氏名　↓値ばりで記入']
-    level = [c for c in name if c in 'ABC'][0]  # Correctly extract level
-    group = name.rstrip('0123456789')
-    ws.append([name, members, level, group])
+    if not input_path.exists():
+        raise FileNotFoundError(f"Input file not found: {input_path}")
 
-wb_new.save(r"c:\Users\User\OneDrive\03=personal(香港)\31 badminton　対戦プログラム\チームリスト.xlsx")
-print("チームリスト.xlsx created")
+    wb = openpyxl.load_workbook(str(input_path), read_only=True)
+    if args.sheet not in wb.sheetnames:
+        raise KeyError(f"Sheet '{args.sheet}' not found. Available: {wb.sheetnames}")
+
+    sheet = wb[args.sheet]
+    data = list(sheet.values)
+    if not data:
+        raise ValueError("Sheet is empty")
+
+    df = pd.DataFrame(data[1:], columns=data[0])
+    valid_teams = df.dropna(subset=[df.columns[0]])
+
+    wb_new = openpyxl.Workbook()
+    ws = wb_new.active
+    ws.title = "チームリスト"
+    ws.append(["ペア名", "氏名", "レベル", "グループ"])
+
+    for _, row in valid_teams.iterrows():
+        name = row.get("ペア名 ↓値ばりで記入")
+        members = row.get("氏名　↓値ばりで記入")
+        if pd.isna(name):
+            continue
+        name = str(name)
+        members = "" if pd.isna(members) else str(members)
+
+        levels = [c for c in name if c in "ABC"]
+        level = levels[0] if levels else ""
+        group = name.rstrip("0123456789")
+        ws.append([name, members, level, group])
+
+    wb_new.save(str(output_path))
+    print(f"Created: {output_path}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
