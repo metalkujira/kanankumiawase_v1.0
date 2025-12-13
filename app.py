@@ -73,6 +73,8 @@ with st.sidebar:
     round_minutes = st.number_input("1ラウンドの時間（分）", min_value=1, max_value=180, value=13, step=1)
     matches_per_team = st.number_input("各ペアの試合数 (0=自動)", min_value=0, max_value=30, value=0, step=1)
 
+    max_consecutive = st.number_input("最大連戦数 (0=制限なし)", min_value=0, max_value=10, value=0, step=1)
+
     diversity_attempts = st.number_input("分散最大化の試行回数", min_value=1, max_value=50, value=1, step=1)
 
     allow_court_gaps = st.checkbox("途中ラウンドの空きコートを許容", value=False)
@@ -117,6 +119,7 @@ if run:
                     diversity_attempts=int(diversity_attempts),
                     graph_mode=True,
                     allow_court_gaps=bool(allow_court_gaps),
+                    max_consecutive=int(max_consecutive),
                     matches_per_team=int(matches_per_team),
                     html_passcode=str(html_passcode),
                     start_time=str(start_time),

@@ -2604,6 +2604,198 @@ def reduce_back_to_back(matches: List[Match], num_rounds: int, courts: int,
     return sorted(matches, key=lambda m: (m.round_num, m.court))
 
 
+def reduce_max_consecutive_streak(matches: List[Match], num_rounds: int, courts: int,
+                                 max_consecutive: int,
+                                 max_iterations: int = 800) -> List[Match]:
+    """Try to eliminate streaks longer than max_consecutive by moving matches into spare slots.
+
+    This is a best-effort heuristic. If the schedule is tight, some teams may still end up
+    exceeding the requested max_consecutive.
+    """
+    if not matches or max_consecutive <= 0:
+        return matches
+    if max_consecutive == 1:
+        # Very restrictive; still attempt but often infeasible.
+        pass
+
+    round_matches: Dict[int, List[Match]] = {r: [] for r in range(1, num_rounds + 1)}
+    round_courts: Dict[int, Set[int]] = {r: set() for r in range(1, num_rounds + 1)}
+    round_names: Dict[int, Set[str]] = {r: set() for r in range(1, num_rounds + 1)}
+    for match in matches:
+        round_matches.setdefault(match.round_num, []).append(match)
+        round_courts.setdefault(match.round_num, set()).add(match.court)
+        round_names.setdefault(match.round_num, set()).add(match.team1.name)
+        round_names[match.round_num].add(match.team2.name)
+
+    def build_team_rounds() -> Dict[str, List[int]]:
+        mapping: Dict[str, List[int]] = defaultdict(list)
+        for m in matches:
+            mapping[m.team1.name].append(m.round_num)
+            mapping[m.team2.name].append(m.round_num)
+        for rs in mapping.values():
+            rs.sort()
+        return mapping
+
+    def max_streak(rounds: List[int]) -> int:
+        if not rounds:
+            return 0
+        sr = sorted(rounds)
+        best = 1
+        cur = 1
+        for i in range(1, len(sr)):
+            if sr[i] == sr[i - 1] + 1:
+                cur += 1
+                if cur > best:
+                    best = cur
+            else:
+                cur = 1
+        return best
+
+    def violation(rounds: List[int]) -> int:
+        return max(0, max_streak(rounds) - max_consecutive)
+
+    def find_longest_streak_segment(rounds: List[int]) -> Tuple[int, int]:
+        """Return (start_round, end_round) inclusive for the longest consecutive segment."""
+        if not rounds:
+            return (0, 0)
+        sr = sorted(rounds)
+        best_s = sr[0]
+        best_e = sr[0]
+        cur_s = sr[0]
+        cur_e = sr[0]
+        for i in range(1, len(sr)):
+            if sr[i] == sr[i - 1] + 1:
+                cur_e = sr[i]
+            else:
+                if (cur_e - cur_s) > (best_e - best_s):
+                    best_s, best_e = cur_s, cur_e
+                cur_s = sr[i]
+                cur_e = sr[i]
+        if (cur_e - cur_s) > (best_e - best_s):
+            best_s, best_e = cur_s, cur_e
+        return best_s, best_e
+
+    def pick_court(r: int) -> Optional[int]:
+        for c in range(1, courts + 1):
+            if c not in round_courts.setdefault(r, set()):
+                return c
+        return None
+
+    def team_rounds_if_moved(team_rounds_map: Dict[str, List[int]], team_name: str,
+                             current_round: int, new_round: int) -> List[int]:
+        rs = [r for r in team_rounds_map.get(team_name, []) if r != current_round]
+        rs.append(new_round)
+        rs.sort()
+        return rs
+
+    def total_violation_for_teams(team_rounds_map: Dict[str, List[int]], team_names: Tuple[str, str]) -> int:
+        return violation(team_rounds_map.get(team_names[0], [])) + violation(team_rounds_map.get(team_names[1], []))
+
+    def choose_problem_match(team_name: str, team_rounds_map: Dict[str, List[int]]) -> Optional[Match]:
+        rounds = team_rounds_map.get(team_name, [])
+        if violation(rounds) <= 0:
+            return None
+        seg_s, seg_e = find_longest_streak_segment(rounds)
+        if seg_s == 0:
+            return None
+        # Move the (max_consecutive+1)-th match inside the segment to break the streak.
+        target_round = seg_s + max_consecutive
+        if target_round > seg_e:
+            target_round = seg_e
+        candidates = [m for m in round_matches.get(target_round, []) if (m.team1.name == team_name or m.team2.name == team_name)]
+        if candidates:
+            # Prefer moving the match where the other team also violates.
+            candidates.sort(
+                key=lambda m: (
+                    -total_violation_for_teams(team_rounds_map, (m.team1.name, m.team2.name)),
+                    m.court,
+                )
+            )
+            return candidates[0]
+        # Fallback: any match in the segment.
+        for r in range(seg_s, seg_e + 1):
+            for m in round_matches.get(r, []):
+                if m.team1.name == team_name or m.team2.name == team_name:
+                    return m
+        return None
+
+    def try_move(match: Match, team_rounds_map: Dict[str, List[int]]) -> bool:
+        t1 = match.team1.name
+        t2 = match.team2.name
+        before = violation(team_rounds_map.get(t1, [])) + violation(team_rounds_map.get(t2, []))
+        if before <= 0:
+            return False
+
+        origin_round = match.round_num
+        candidates: List[Tuple[int, int, int, int]] = []
+        for r in range(1, num_rounds + 1):
+            if r == origin_round:
+                continue
+            if len(round_matches.get(r, [])) >= courts:
+                continue
+            names = round_names.setdefault(r, set())
+            if t1 in names or t2 in names:
+                continue
+
+            rs1 = team_rounds_if_moved(team_rounds_map, t1, origin_round, r)
+            rs2 = team_rounds_if_moved(team_rounds_map, t2, origin_round, r)
+            after = violation(rs1) + violation(rs2)
+            # Prefer strict improvement; allow equal only if it increases spacing by spreading load.
+            if after > before:
+                continue
+            load = len(round_matches.get(r, []))
+            dist = abs(r - origin_round)
+            candidates.append((after, load, dist, r))
+
+        if not candidates:
+            return False
+        candidates.sort(key=lambda x: (x[0], x[1], x[2], x[3]))
+        target_round = candidates[0][3]
+        new_court = pick_court(target_round)
+        if new_court is None:
+            return False
+
+        # Apply move
+        if match in round_matches.get(origin_round, []):
+            round_matches[origin_round].remove(match)
+        round_courts.setdefault(origin_round, set()).discard(match.court)
+        round_names.setdefault(origin_round, set()).discard(t1)
+        round_names[origin_round].discard(t2)
+
+        match.round_num = target_round
+        match.court = new_court
+        round_matches[target_round].append(match)
+        round_courts[target_round].add(new_court)
+        round_names[target_round].add(t1)
+        round_names[target_round].add(t2)
+        return True
+
+    attempts = 0
+    while attempts < max_iterations:
+        team_rounds_map = build_team_rounds()
+        offenders = [
+            (violation(rs), name)
+            for name, rs in team_rounds_map.items()
+            if violation(rs) > 0
+        ]
+        if not offenders:
+            break
+        offenders.sort(key=lambda x: (-x[0], x[1]))
+        progressed = False
+        for _, team_name in offenders[:20]:
+            m = choose_problem_match(team_name, team_rounds_map)
+            if m is None:
+                continue
+            if try_move(m, team_rounds_map):
+                attempts += 1
+                progressed = True
+                break
+        if not progressed:
+            break
+
+    return sorted(matches, key=lambda m: (m.round_num, m.court))
+
+
 def eliminate_mid_session_court_gaps(matches: List[Match], num_rounds: int, courts: int) -> List[Match]:
     """Shift matches forward so early rounds remain fully utilized when possible."""
     if not matches:
@@ -4141,6 +4333,7 @@ def generate_schedule(
     diversity_attempts: int = typer.Option(1, help="分散最大化の試行回数"),
     graph_mode: bool = typer.Option(True, help="グラフ構築モードを使用 (必須条件安定化)"),
     allow_court_gaps: bool = typer.Option(False, help="途中ラウンドの空きコートを許容するか（審判運用のため通常はOFF推奨）"),
+    max_consecutive: int = typer.Option(0, help="最大連戦数。0で制限なし。例:2（3連戦を避ける）"),
     matches_per_team: int = typer.Option(0, help="各ペアの試合数。0で自動（全員同数を最優先）。例: 6"),
     html_passcode: str = typer.Option("", help="HTMLの簡易ロック用パスコード（注意: 完全な暗号化ではありません）"),
     start_time: str = typer.Option(DEFAULT_START_TIME_HHMM, help="開始時刻 (HH:MM)"),
@@ -4157,6 +4350,13 @@ def generate_schedule(
         TARGET_MATCHES_PER_TEAM = compute_auto_matches_per_team(len(probe_teams), num_rounds, courts)
     else:
         TARGET_MATCHES_PER_TEAM = matches_per_team
+
+    if max_consecutive < 0:
+        raise typer.BadParameter("max_consecutive は 0 以上を指定してください")
+
+    effective_allow_court_gaps = bool(allow_court_gaps) or (max_consecutive > 0)
+    if (max_consecutive > 0) and (not allow_court_gaps):
+        print("注意: max_consecutive を指定したため、連戦削減のため途中ラウンドの空きコートを許容して最適化します")
 
     capacity = num_rounds * courts
     expected_matches_total = expected_total_matches(len(probe_teams), TARGET_MATCHES_PER_TEAM)
@@ -4216,10 +4416,12 @@ def generate_schedule(
                     print(f"修復後も残る衝突: {len(after)}")
             # Ensure we never exceed physical court capacity even if collision repair is imperfect.
             matches = normalize_round_capacity(matches, num_rounds, courts)
-            if not allow_court_gaps:
+            if not effective_allow_court_gaps:
                 matches = eliminate_mid_session_court_gaps(matches, num_rounds, courts)
             matches = ensure_round_one_full(matches, num_rounds, courts)
             matches = compact_court_usage(matches, num_rounds, courts)
+            if max_consecutive > 0:
+                matches = reduce_max_consecutive_streak(matches, num_rounds, courts, max_consecutive=max_consecutive)
         # 条件確認
         if any(t.matches != TARGET_MATCHES_PER_TEAM for t in teams):
             print(f"試行 {attempt}: 未達ペアあり -> スキップ")
