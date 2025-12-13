@@ -88,4 +88,13 @@ streamlit run app.py
 - Streamlit Community Cloudは基本的に「GitHubのPublicリポジトリ」が前提です。
 - Privateのまま使うなら、Streamlit Cloudの有料プランか、自前サーバー/自PCでの起動が現実的です。
 
+### Streamlit Community Cloud で公開する手順（概要）
+
+1. GitHubのリポジトリを `Public` にする（Community Cloudの前提）
+2. Streamlit Community Cloud で `New app` → 対象リポジトリ/ブランチを選択
+3. `Main file path` を `app.py` にする
+4. デプロイ
+
+このリポジトリには `requirements.txt` を入れてあり、`-e .` でパッケージをインストールします（src構成でも import できるようにするため）。
+
 HTMLはサーバー上で公開せず、生成後にダウンロードさせる運用を推奨します（簡易ロックは暗号化ではありません）。

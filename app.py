@@ -13,6 +13,10 @@ st.set_page_config(page_title="Badminton Scheduler", layout="wide")
 
 st.title("Badminton Scheduler")
 st.caption("Excelのチームリストをアップロードして、コート数/ラウンド数/各ペア試合数を指定して生成します。")
+st.warning(
+    "公開運用の注意: アップロードされたExcelはサーバー側で処理されます。個人情報が含まれる場合は匿名化/最小化してからアップロードしてください。",
+    icon="⚠️",
+)
 
 with st.sidebar:
     st.header("設定")
@@ -65,8 +69,8 @@ if run:
                 )
 
                 # Find generated files (timestamped).
-                xlsx_files = sorted(tmp_dir.glob("schedule_*\.xlsx"))
-                html_files = sorted(tmp_dir.glob("schedule_*\.html"))
+                xlsx_files = sorted(tmp_dir.glob("schedule_*.xlsx"))
+                html_files = sorted(tmp_dir.glob("schedule_*.html"))
 
                 if not xlsx_files:
                     raise RuntimeError("Excel出力が見つかりませんでした")
