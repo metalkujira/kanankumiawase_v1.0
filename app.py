@@ -53,17 +53,17 @@ with st.sidebar:
         use_container_width=True,
     )
     st.caption("このテンプレに入力してアップロードしてください（先頭/左端のシートを読みます）。")
-    
-        st.markdown("### サンプル（ダミーデータ）")
-        st.caption("適当なチーム名・氏名が入ったサンプルExcelをダウンロードできます（個人情報なし）")
-        sample_bytes = scheduler.build_team_list_sample_bytes()
-        st.download_button(
-            label="チーム一覧サンプル（ダミーデータ）をダウンロード",
-            data=sample_bytes,
-            file_name="チームリスト_サンプル.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-        )
+
+    st.markdown("### サンプル（ダミーデータ）")
+    st.caption("適当なチーム名・氏名が入ったサンプルExcelをダウンロードできます（個人情報なし）")
+    sample_bytes = scheduler.build_team_list_sample_bytes()
+    st.download_button(
+        label="チーム一覧サンプル（ダミーデータ）をダウンロード",
+        data=sample_bytes,
+        file_name="チームリスト_サンプル.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+    )
 
     uploaded = st.file_uploader("チーム一覧Excel (.xlsx)", type=["xlsx"]) 
 
