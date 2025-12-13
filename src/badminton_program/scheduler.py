@@ -4033,27 +4033,33 @@ body.locked > :not(#lock-overlay) {filter: blur(2px); pointer-events: none; user
 }
 .sticky-col {position: -webkit-sticky; position: sticky; box-shadow: inset -1px 0 0 rgba(0,0,0,0.08);}
 td.sticky-col {background: #fff;}
-#match-matrix, #short-team, #short-round {table-layout: fixed;}
-#match-matrix td:not(.sticky-col), #short-team td:not(.sticky-col), #short-round td:not(.sticky-col) {white-space: normal; word-break: break-word;}
+#match-matrix, #short-team, #short-round, #personal-schedule {table-layout: fixed;}
+#match-matrix td:not(.sticky-col), #short-team td:not(.sticky-col), #short-round td:not(.sticky-col), #personal-schedule td:not(.sticky-col) {white-space: normal; word-break: break-word; overflow-wrap: anywhere;}
 #match-matrix .match-col, #short-team .round-col, #short-round .round-col, #short-team .court-col, #short-round .court-col {white-space: nowrap;}
 #match-matrix .match-col {left: 0; min-width: var(--match-col-width); max-width: var(--match-col-width);}
 #short-team .round-col, #short-round .round-col {left: 0; min-width: var(--short-round-width); max-width: var(--short-round-width);}
 #short-team .court-col, #short-round .court-col {left: var(--short-round-width); min-width: var(--short-court-width); max-width: var(--short-court-width);}
 #personal-schedule .team-col {left: 0; min-width: var(--personal-team-width); max-width: var(--personal-team-width);}
 #personal-schedule .member-col {left: var(--personal-team-width); min-width: var(--personal-member-width); max-width: var(--personal-member-width);}
-#personal-schedule .team-col, #personal-schedule .member-col {white-space: normal; word-break: break-word;}
+#personal-schedule .team-col, #personal-schedule .member-col {white-space: normal; word-break: break-word; overflow-wrap: anywhere; line-height: 1.15;}
 @media (max-width: 768px) {
     :root {
         --match-col-width: 84px;
         --short-round-width: 80px;
         --short-court-width: 56px;
-        --personal-team-width: 96px;
-        --personal-member-width: 128px;
+        --personal-team-width: 56px;
+        --personal-member-width: 78px;
     }
     body {margin: 12px;}
-    table {font-size: 11px; min-width: 520px;}
+    table {font-size: 11px; min-width: 420px;}
     th, td {padding: 3px 4px;}
     .filter-bar {gap: 8px;}
+    #personal-schedule td.team-col, #personal-schedule td.member-col,
+    #personal-schedule th.team-col, #personal-schedule th.member-col {
+        padding: 2px 3px;
+        font-size: 10px;
+        line-height: 1.05;
+    }
 }
 </style>
         """
@@ -4304,6 +4310,123 @@ import typer
 app = typer.Typer()
 
 
+def _coerce_hhmm(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        v = value.strip()
+        if not v:
+            return None
+        # accept HH:MM or H:MM
+        parts = v.split(":")
+        if len(parts) == 2:
+            try:
+                h = int(parts[0])
+                m = int(parts[1])
+                if 0 <= h <= 23 and 0 <= m <= 59:
+                    return f"{h:02d}:{m:02d}"
+            except Exception:
+                return None
+        return None
+    if isinstance(value, datetime):
+        return f"{value.hour:02d}:{value.minute:02d}"
+    # openpyxl can return datetime.time
+    try:
+        from datetime import time as _time
+
+        if isinstance(value, _time):
+            return f"{value.hour:02d}:{value.minute:02d}"
+    except Exception:
+        pass
+    return None
+
+
+def load_schedule_from_xlsx(schedule_xlsx: str, *, fallback_start_time_hhmm: str, fallback_round_minutes: int) -> tuple[list[Match], list[Team], int, int]:
+    """Load matches/teams from an Excel exported by this tool, including manual edits.
+
+    Expected sheets:
+    - 対戦表: round rows with per-court team1/team2 cells
+    - ペア一覧: team metadata (members/level/group)
+    """
+
+    wb = openpyxl.load_workbook(schedule_xlsx, data_only=True)
+    if "対戦表" not in wb.sheetnames:
+        raise ValueError("Excelに '対戦表' シートが見つかりません")
+    ws = wb["対戦表"]
+
+    teams_by_name: dict[str, Team] = {}
+    if "ペア一覧" in wb.sheetnames:
+        ws_pairs = wb["ペア一覧"]
+        # header: ペア名, 選手名, レベル, グループ, 試合数
+        for row in ws_pairs.iter_rows(min_row=2, values_only=True):
+            if not row:
+                continue
+            name = str(row[0]).strip() if row[0] is not None else ""
+            if not name:
+                continue
+            members = str(row[1]).strip() if len(row) > 1 and row[1] is not None else ""
+            level = str(row[2]).strip() if len(row) > 2 and row[2] is not None else ""
+            group = str(row[3]).strip() if len(row) > 3 and row[3] is not None else ""
+            teams_by_name[name] = Team(name=name, members=members, level=level, group=group)
+
+    def get_team(name_raw: Any) -> Team:
+        name = str(name_raw).strip() if name_raw is not None else ""
+        if not name:
+            raise ValueError("対戦表に空のチーム名が含まれています")
+        if name in teams_by_name:
+            return teams_by_name[name]
+        teams_by_name[name] = Team(name=name, members="", level="", group="")
+        return teams_by_name[name]
+
+    max_col = ws.max_column
+    if max_col < 5:
+        raise ValueError("対戦表の列数が少なすぎます（想定: '試合','開始','終了', 以降コート毎に2列）")
+    courts = (max_col - 3) // 2
+    if courts <= 0:
+        raise ValueError("対戦表からコート数を推定できません")
+
+    matches: list[Match] = []
+    detected_rounds: set[int] = set()
+    for row_idx in range(2, ws.max_row + 1):
+        round_val = ws.cell(row=row_idx, column=1).value
+        if round_val is None or str(round_val).strip() == "":
+            continue
+        try:
+            round_num = int(round_val)
+        except Exception as e:
+            raise ValueError(f"対戦表の試合番号が不正です: row={row_idx} value={round_val}") from e
+        detected_rounds.add(round_num)
+
+        start_raw = ws.cell(row=row_idx, column=2).value
+        start_hhmm = _coerce_hhmm(start_raw)
+        if not start_hhmm:
+            base = _base_datetime_from_hhmm(fallback_start_time_hhmm)
+            start_dt = base + timedelta(minutes=int(fallback_round_minutes) * (round_num - 1))
+        else:
+            start_dt = _base_datetime_from_hhmm(start_hhmm)
+
+        for court in range(1, courts + 1):
+            col_team1 = 3 + (court - 1) * 2 + 1
+            col_team2 = col_team1 + 1
+            t1 = ws.cell(row=row_idx, column=col_team1).value
+            t2 = ws.cell(row=row_idx, column=col_team2).value
+            if t1 is None and t2 is None:
+                continue
+            t1s = str(t1).strip() if t1 is not None else ""
+            t2s = str(t2).strip() if t2 is not None else ""
+            if not t1s and not t2s:
+                continue
+            if not t1s or not t2s:
+                raise ValueError(f"対戦表に片側だけチーム名があります: round={round_num} court={court}")
+            team1 = get_team(t1s)
+            team2 = get_team(t2s)
+            matches.append(Match(round_num=round_num, court=court, team1=team1, team2=team2, start_time=start_dt))
+
+    num_rounds = max(detected_rounds) if detected_rounds else 0
+    teams = list(teams_by_name.values())
+    return matches, teams, num_rounds, courts
+
+
 @app.command()
 def template(
     output_file: str = typer.Option("チームリスト_テンプレ.xlsx", help="ヘッダーのみのチーム一覧テンプレートExcelを出力"),
@@ -4518,6 +4641,47 @@ def generate_schedule(
         print("警告: 未達ペア", under)
     else:
         print(f"全ペア{TARGET_MATCHES_PER_TEAM}試合達成 ✅")
+
+
+@app.command()
+def html_from_xlsx(
+    input_file: str = typer.Option(..., help="（手で編集した後の）スケジュールExcelファイル。'対戦表' と 'ペア一覧' を含むこと"),
+    output_file: str = typer.Option("", help="出力HTMLファイル。空なら input_file と同名で .html"),
+    html_passcode: str = typer.Option("", help="HTMLの簡易ロック用パスコード（注意: 完全な暗号化ではありません）"),
+    start_time: str = typer.Option(DEFAULT_START_TIME_HHMM, help="開始時刻 (HH:MM) ※Excelに開始が無い場合の補助"),
+    round_minutes: int = typer.Option(DEFAULT_ROUND_MINUTES, help="1ラウンドの時間（分） ※Excelに開始が無い場合の補助"),
+):
+    if round_minutes <= 0:
+        raise typer.BadParameter("round_minutes は 1 以上を指定してください")
+    try:
+        _parse_hhmm(start_time)
+    except ValueError as e:
+        raise typer.BadParameter(str(e))
+
+    in_path = Path(input_file)
+    if not in_path.exists():
+        raise typer.BadParameter(f"入力ファイルが見つかりません: {input_file}")
+    out_path = Path(output_file) if output_file else in_path.with_suffix(".html")
+
+    matches, teams, num_rounds, courts = load_schedule_from_xlsx(
+        str(in_path),
+        fallback_start_time_hhmm=start_time,
+        fallback_round_minutes=int(round_minutes),
+    )
+    if num_rounds <= 0 or courts <= 0:
+        raise RuntimeError("Excelからラウンド数/コート数を推定できませんでした")
+
+    write_personal_schedule_html(
+        matches,
+        teams,
+        str(out_path),
+        num_rounds=num_rounds,
+        courts=courts,
+        html_passcode=html_passcode or None,
+        start_time_hhmm=start_time,
+        round_minutes=int(round_minutes),
+    )
+    print(f"HTML出力: {out_path}")
 
 if __name__ == "__main__":
     app()
