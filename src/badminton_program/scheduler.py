@@ -11,6 +11,116 @@ from collections import defaultdict, Counter
 from html import escape
 import math
 import hashlib
+from io import BytesIO
+
+
+DEFAULT_START_TIME_HHMM = "12:50"
+DEFAULT_ROUND_MINUTES = 13
+
+TEAM_LIST_TEMPLATE_SHEET_NAME = "チーム一覧"
+TEAM_LIST_TEMPLATE_HEADERS = [
+    "ペア名",
+    "氏名",
+    "レベル",
+    "グループ",
+    "優先1",
+    "優先2",
+    "優先3",
+]
+
+
+TEAM_LIST_SAMPLE_SHEET_NAME = TEAM_LIST_TEMPLATE_SHEET_NAME
+TEAM_LIST_SAMPLE_HEADERS = TEAM_LIST_TEMPLATE_HEADERS
+
+
+def build_team_list_sample_rows() -> List[List[str]]:
+    """Return dummy rows with clearly non-personal placeholder data."""
+
+    def row(pair: str, members: str, level: str, group: str) -> List[str]:
+        return [pair, members, level, group, "", "", ""]
+
+    rows: List[List[str]] = []
+    # A: 4 teams (unique groups)
+    rows += [
+        row("サンプルA1", "TEST_A1P1, TEST_A1P2", "A", "クラブA1"),
+        row("サンプルA2", "TEST_A2P1, TEST_A2P2", "A", "クラブA2"),
+        row("サンプルA3", "TEST_A3P1, TEST_A3P2", "A", "クラブA3"),
+        row("サンプルA4", "TEST_A4P1, TEST_A4P2", "A", "クラブA4"),
+    ]
+    # B: 4 teams (unique groups)
+    rows += [
+        row("サンプルB1", "TEST_B1P1, TEST_B1P2", "B", "クラブB1"),
+        row("サンプルB2", "TEST_B2P1, TEST_B2P2", "B", "クラブB2"),
+        row("サンプルB3", "TEST_B3P1, TEST_B3P2", "B", "クラブB3"),
+        row("サンプルB4", "TEST_B4P1, TEST_B4P2", "B", "クラブB4"),
+    ]
+    # C: 4 teams (unique groups)
+    rows += [
+        row("サンプルC1", "TEST_C1P1, TEST_C1P2", "C", "クラブC1"),
+        row("サンプルC2", "TEST_C2P1, TEST_C2P2", "C", "クラブC2"),
+        row("サンプルC3", "TEST_C3P1, TEST_C3P2", "C", "クラブC3"),
+        row("サンプルC4", "TEST_C4P1, TEST_C4P2", "C", "クラブC4"),
+    ]
+    return rows
+
+
+def build_team_list_sample_bytes(
+    sheet_name: str = TEAM_LIST_SAMPLE_SHEET_NAME,
+    headers: List[str] = TEAM_LIST_SAMPLE_HEADERS,
+) -> bytes:
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = sheet_name
+    ws.append(list(headers))
+    for r in build_team_list_sample_rows():
+        ws.append(r)
+    ws.freeze_panes = "A2"
+    with BytesIO() as bio:
+        wb.save(bio)
+        return bio.getvalue()
+
+
+def build_team_list_template_bytes(
+    sheet_name: str = TEAM_LIST_TEMPLATE_SHEET_NAME,
+    headers: List[str] = TEAM_LIST_TEMPLATE_HEADERS,
+) -> bytes:
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = sheet_name
+    ws.append(list(headers))
+    ws.freeze_panes = "A2"
+    with BytesIO() as bio:
+        wb.save(bio)
+        return bio.getvalue()
+
+
+def _parse_hhmm(value: str) -> tuple[int, int]:
+    """Parse HH:MM string."""
+    try:
+        parts = value.strip().split(":")
+        if len(parts) != 2:
+            raise ValueError
+        hour = int(parts[0])
+        minute = int(parts[1])
+    except Exception as e:
+        raise ValueError(f"Invalid time '{value}'. Use HH:MM (e.g. 12:50).") from e
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        raise ValueError(f"Invalid time '{value}'. Use HH:MM with 00:00..23:59.")
+    return hour, minute
+
+
+def _base_datetime_from_hhmm(value: str) -> datetime:
+    hour, minute = _parse_hhmm(value)
+    return datetime(2000, 1, 1, hour, minute)
+
+
+def apply_round_times(matches: List["Match"], start_time_hhmm: str, round_minutes: int) -> None:
+    if round_minutes <= 0:
+        raise ValueError("round_minutes must be positive")
+    base = _base_datetime_from_hhmm(start_time_hhmm)
+    step = timedelta(minutes=int(round_minutes))
+    for m in matches:
+        m.start_time = base + (m.round_num - 1) * step
 
 
 @dataclass
@@ -2869,8 +2979,16 @@ def write_to_excel(matches: List[Match], output_path: str):
     
     wb.save(output_path)
 
-def write_to_excel_like_summary(matches: List[Match], teams: List[Team], output_path: str,
-                                allow_court_gaps: bool, num_rounds: int, courts: int):
+def write_to_excel_like_summary(
+    matches: List[Match],
+    teams: List[Team],
+    output_path: str,
+    allow_court_gaps: bool,
+    num_rounds: int,
+    courts: int,
+    start_time_hhmm: str = DEFAULT_START_TIME_HHMM,
+    round_minutes: int = DEFAULT_ROUND_MINUTES,
+):
     wb = openpyxl.Workbook()
     from openpyxl.styles import PatternFill, Font, Border, Side, Alignment
     from openpyxl.formatting.rule import FormulaRule
@@ -2882,14 +3000,19 @@ def write_to_excel_like_summary(matches: List[Match], teams: List[Team], output_
         'C': PatternFill(start_color="CFE2F3", end_color="CFE2F3", fill_type="solid"),  # light blue
     }
     
-    max_court = 15
+    max_court = courts
+    base_time = _base_datetime_from_hhmm(start_time_hhmm)
+    round_duration = timedelta(minutes=int(round_minutes))
+
+    # Normalize all match timestamps for consistent Excel/HTML output.
+    apply_round_times(matches, start_time_hhmm=start_time_hhmm, round_minutes=int(round_minutes))
 
     # Sheet 1: 集計表
     ws1 = wb.active
     ws1.title = "集計表"
     ws1.append(["チーム1", "チーム2", "コート", "試合", "開始", "終了"])
     for match in matches:
-        end_time = (match.start_time + timedelta(minutes=13)).strftime("%H:%M")
+        end_time = (match.start_time + round_duration).strftime("%H:%M")
         ws1.append([
             match.team1.name,
             match.team2.name,
@@ -2906,19 +3029,18 @@ def write_to_excel_like_summary(matches: List[Match], teams: List[Team], output_
     for c in range(1, max_court + 1):
         header += [f"コート{c}-チーム1", f"コート{c}-チーム2"]
     ws2.append(header)
-    for round_num in range(1, 24):
+    for round_num in range(1, num_rounds + 1):
         # derive time from any match in round or compute from start
         round_start = None
         any_match = next((m for m in matches if m.round_num == round_num), None)
         if any_match:
             round_start = any_match.start_time.strftime("%H:%M")
         else:
-            # fallback: compute assuming 13 min intervals from 12:50
-            base = datetime(2025, 11, 26, 12, 50)
-            round_start = (base + timedelta(minutes=13*(round_num-1))).strftime("%H:%M")
+            # fallback: compute from configured start time
+            round_start = (base_time + timedelta(minutes=int(round_minutes) * (round_num - 1))).strftime("%H:%M")
         # compute end
         start_dt = datetime.strptime(round_start, "%H:%M")
-        round_end = (start_dt + timedelta(minutes=13)).strftime("%H:%M")
+        round_end = (start_dt + round_duration).strftime("%H:%M")
         row = [round_num, round_start, round_end]
         for court in range(1, max_court + 1):
             match = next((m for m in matches if m.round_num == round_num and m.court == court), None)
@@ -2953,7 +3075,7 @@ def write_to_excel_like_summary(matches: List[Match], teams: List[Team], output_
     short_entries: list[dict[str, Any]] = []
     for match in matches:
         time_str = match.start_time.strftime("%H:%M")
-        end_str = (match.start_time + timedelta(minutes=13)).strftime("%H:%M")
+        end_str = (match.start_time + round_duration).strftime("%H:%M")
         rows = [
             (match.team1, match.team2),
             (match.team2, match.team1),
@@ -3163,7 +3285,7 @@ def write_to_excel_like_summary(matches: List[Match], teams: List[Team], output_
 
     # Sheet 6: 個人スケジュール表（マトリクス）
     ws6 = wb.create_sheet("個人スケジュール表")
-    header = ["ペア名", "選手名"] + [f"R{r}" for r in range(1, 24)]
+    header = ["ペア名", "選手名"] + [f"R{r}" for r in range(1, num_rounds + 1)]
     ws6.append(header)
     # Build quick lookup: (round, team_name) -> court/time
     rt_lookup: dict[tuple[int, str], tuple[int, str]] = {}
@@ -3185,7 +3307,7 @@ def write_to_excel_like_summary(matches: List[Match], teams: List[Team], output_
 
     for t in sorted(teams, key=alphabetical_team_key):
         row = [t.name, t.members]
-        for r in range(1, 24):
+        for r in range(1, num_rounds + 1):
             ct = rt_lookup.get((r, t.name))
             opp = opp_lookup.get((r, t.name))
             oppm = opp_members_lookup.get((r, t.name))
@@ -3313,14 +3435,14 @@ def write_to_excel_like_summary(matches: List[Match], teams: List[Team], output_
     band_A = set(range(1,5))
     band_B = set(range(5,13))
     band_C = set(range(13,16))
-    for r in range(1, 24):
+    for r in range(1, num_rounds + 1):
         rm = [m for m in matches if m.round_num == r]
         total = len(rm)
         a_cnt = sum(1 for m in rm if m.team1.level == 'A')
         b_cnt = sum(1 for m in rm if m.team1.level == 'B')
         c_cnt = sum(1 for m in rm if m.team1.level == 'C')
-        empty = 15 - total
-        usage = (total/15*100) if total>0 else 0.0
+        empty = courts - total
+        usage = (total / courts * 100) if courts > 0 else 0.0
         a_band_used = sum(1 for m in rm if m.court in band_A and m.team1.level=='A')
         b_band_used = sum(1 for m in rm if m.court in band_B and m.team1.level=='B')
         c_band_used = sum(1 for m in rm if m.court in band_C and m.team1.level=='C')
@@ -3335,7 +3457,7 @@ def write_to_excel_like_summary(matches: List[Match], teams: List[Team], output_
     # 最終衝突チェック: もし不足があれば修復して再書き込み
     if expected - displayed > 0:
         print(f"対戦表表示不足 {expected - displayed} 試合検出 → 修復試行")
-        matches = repair_collisions(matches, 23, 15)
+        matches = repair_collisions(matches, num_rounds, courts)
         print(f"After auto-repair, max round: {max(m.round_num for m in matches)}, min round: {min(m.round_num for m in matches)}")
         print(f"After auto-repair, max court: {max(m.court for m in matches)}, min court: {min(m.court for m in matches)}")
         # 対戦表シート再書き込み
@@ -3346,19 +3468,18 @@ def write_to_excel_like_summary(matches: List[Match], teams: List[Team], output_
                 # fillはデフォルトに戻す
                 ws2.cell(row=row, column=col).fill = PatternFill()
         # 再書き込み
-        for round_num in range(1, 24):
+        for round_num in range(1, num_rounds + 1):
             # derive time from any match in round or compute from start
             round_start = None
             any_match = next((m for m in matches if m.round_num == round_num), None)
             if any_match:
                 round_start = any_match.start_time.strftime("%H:%M")
             else:
-                # fallback: compute assuming 13 min intervals from 12:50
-                base = datetime(2025, 11, 26, 12, 50)
-                round_start = (base + timedelta(minutes=13*(round_num-1))).strftime("%H:%M")
+                # fallback: compute from configured start time
+                round_start = (base_time + timedelta(minutes=int(round_minutes) * (round_num - 1))).strftime("%H:%M")
             # compute end
             start_dt = datetime.strptime(round_start, "%H:%M")
-            round_end = (start_dt + timedelta(minutes=13)).strftime("%H:%M")
+            round_end = (start_dt + round_duration).strftime("%H:%M")
             row = [round_num, round_start, round_end]
             for court in range(1, max_court + 1):
                 match = next((m for m in matches if m.round_num == round_num and m.court == court), None)
@@ -3398,7 +3519,9 @@ def write_to_excel_like_summary(matches: List[Match], teams: List[Team], output_
 
 def write_personal_schedule_html(matches: List[Match], teams: List[Team], output_path: str,
                                  num_rounds: int = 23, courts: int = 15,
-                                 html_passcode: str | None = None) -> None:
+                                 html_passcode: str | None = None,
+                                 start_time_hhmm: str = DEFAULT_START_TIME_HHMM,
+                                 round_minutes: int = DEFAULT_ROUND_MINUTES) -> None:
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     header_rounds = [f"R{r}" for r in range(1, num_rounds + 1)]
@@ -3444,10 +3567,10 @@ def write_personal_schedule_html(matches: List[Match], teams: List[Team], output
         if any_match:
             round_start = any_match.start_time.strftime("%H:%M")
         else:
-            base = datetime(2025, 11, 26, 12, 50)
-            round_start = (base + timedelta(minutes=13 * (round_num - 1))).strftime("%H:%M")
+            base = _base_datetime_from_hhmm(start_time_hhmm)
+            round_start = (base + timedelta(minutes=int(round_minutes) * (round_num - 1))).strftime("%H:%M")
         start_dt = datetime.strptime(round_start, "%H:%M")
-        round_end = (start_dt + timedelta(minutes=13)).strftime("%H:%M")
+        round_end = (start_dt + timedelta(minutes=int(round_minutes))).strftime("%H:%M")
         row: list[tuple[str, bool]] = [(f"第{round_num}試合", False), (round_start, False), (round_end, False)]
         clubs_in_round: set[str] = set()
         teams_in_round: set[str] = set()
@@ -3989,6 +4112,26 @@ import typer
 
 app = typer.Typer()
 
+
+@app.command()
+def template(
+    output_file: str = typer.Option("チームリスト_テンプレ.xlsx", help="ヘッダーのみのチーム一覧テンプレートExcelを出力"),
+    sheet_name: str = typer.Option(TEAM_LIST_TEMPLATE_SHEET_NAME, help="作成するシート名"),
+):
+    data = build_team_list_template_bytes(sheet_name=sheet_name)
+    Path(output_file).write_bytes(data)
+    print(f"テンプレート出力: {output_file} (sheet='{sheet_name}')")
+
+
+@app.command()
+def sample_xlsx(
+    output_file: str = typer.Option("チームリスト_サンプル.xlsx", help="ダミーデータ入りのサンプルチーム一覧Excelを出力"),
+    sheet_name: str = typer.Option(TEAM_LIST_SAMPLE_SHEET_NAME, help="作成するシート名"),
+):
+    data = build_team_list_sample_bytes(sheet_name=sheet_name)
+    Path(output_file).write_bytes(data)
+    print(f"サンプル出力: {output_file} (sheet='{sheet_name}')")
+
 @app.command()
 def generate_schedule(
     input_file: str = typer.Option("チームリスト.xlsx", help="チーム一覧Excel"),
@@ -4000,6 +4143,8 @@ def generate_schedule(
     allow_court_gaps: bool = typer.Option(False, help="途中ラウンドの空きコートを許容するか（審判運用のため通常はOFF推奨）"),
     matches_per_team: int = typer.Option(0, help="各ペアの試合数。0で自動（全員同数を最優先）。例: 6"),
     html_passcode: str = typer.Option("", help="HTMLの簡易ロック用パスコード（注意: 完全な暗号化ではありません）"),
+    start_time: str = typer.Option(DEFAULT_START_TIME_HHMM, help="開始時刻 (HH:MM)"),
+    round_minutes: int = typer.Option(DEFAULT_ROUND_MINUTES, help="1ラウンドの時間（分）"),
 ):
     if not graph_mode:
         raise typer.BadParameter("現在は graph_mode=True のみをサポートします")
@@ -4023,6 +4168,12 @@ def generate_schedule(
         raise typer.BadParameter(
             f"容量不足: courts*num_rounds={capacity} 試合枠に対し、必要試合数={expected_matches_total}（ペア数={len(probe_teams)}, 目標={TARGET_MATCHES_PER_TEAM}試合/ペア）"
         )
+    if round_minutes <= 0:
+        raise typer.BadParameter("round_minutes は 1 以上を指定してください")
+    try:
+        _parse_hhmm(start_time)
+    except ValueError as e:
+        raise typer.BadParameter(str(e))
     print(f"目標試合数/ペア: {TARGET_MATCHES_PER_TEAM}（自動={matches_per_team==0}） / 必要試合数 {expected_matches_total} / 容量 {capacity}")
 
     best_matches: List[Match] | None = None
@@ -4093,11 +4244,28 @@ def generate_schedule(
     final_output_path = base_path.with_name(stamped_name)
 
     refresh_team_stats(best_teams, best_matches)
-    write_to_excel_like_summary(best_matches, best_teams, str(final_output_path),
-                                allow_court_gaps, num_rounds, courts)
+    apply_round_times(best_matches, start_time_hhmm=start_time, round_minutes=int(round_minutes))
+    write_to_excel_like_summary(
+        best_matches,
+        best_teams,
+        str(final_output_path),
+        allow_court_gaps,
+        num_rounds,
+        courts,
+        start_time_hhmm=start_time,
+        round_minutes=int(round_minutes),
+    )
     html_output_path = final_output_path.with_suffix('.html')
-    write_personal_schedule_html(best_matches, best_teams, str(html_output_path), num_rounds, courts,
-                                 html_passcode=html_passcode or None)
+    write_personal_schedule_html(
+        best_matches,
+        best_teams,
+        str(html_output_path),
+        num_rounds,
+        courts,
+        html_passcode=html_passcode or None,
+        start_time_hhmm=start_time,
+        round_minutes=int(round_minutes),
+    )
     print(f"スケジュール出力: {final_output_path}")
     print("  含まれる主要シート: 対戦表 / 個人スケジュール表 / 対戦一覧短縮（チーム順/試合順）")
     print(f"HTML一式(対戦表+短縮+個人): {html_output_path}")
@@ -4107,7 +4275,10 @@ def generate_schedule(
         level_matches = [m for m in best_matches if m.team1.level == level]
         print(f"レベル {level}: {len(level_matches)} 試合")
         lvl_teams = [t for t in best_teams if t.level == level]
-        print(f"  チーム数 {len(lvl_teams)} / 平均試合数 {sum(t.matches for t in lvl_teams)/len(lvl_teams):.1f}")
+        if lvl_teams:
+            print(f"  チーム数 {len(lvl_teams)} / 平均試合数 {sum(t.matches for t in lvl_teams)/len(lvl_teams):.1f}")
+        else:
+            print("  チーム数 0")
     # 成功確認
     under = [t.name for t in best_teams if t.matches != TARGET_MATCHES_PER_TEAM]
     if under:

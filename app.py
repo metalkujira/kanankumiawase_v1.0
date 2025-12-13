@@ -13,7 +13,7 @@ st.set_page_config(page_title="Badminton Scheduler", layout="wide")
 st.title("Badminton Scheduler")
 st.caption("Excelのチームリストをアップロードして、コート数/ラウンド数/各ペア試合数を指定して生成します。")
 st.warning(
-    "公開運用の注意: アップロードされたExcelはサーバー側で処理されます。個人情報が含まれる場合は匿名化/最小化してからアップロードしてください。",
+    "公開運用の注意: アップロードされたExcelはサーバー側で処理されます。アプリ側では一時ディレクトリで処理して終了後に削除しますが、基盤（Streamlit Cloud等）のログ/監視/バックアップ等まで含めて完全な削除を保証はできません。個人情報は匿名化/最小化してからアップロードしてください。",
 )
 
 
@@ -45,10 +45,32 @@ if not st.session_state.authed:
 with st.sidebar:
     st.header("設定")
 
+    st.download_button(
+        "テンプレExcel(ヘッダーのみ)をダウンロード",
+        data=scheduler.build_team_list_template_bytes(),
+        file_name="チームリスト_テンプレ.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+    )
+    st.caption("このテンプレに入力してアップロードしてください（先頭/左端のシートを読みます）。")
+    
+        st.markdown("### サンプル（ダミーデータ）")
+        st.caption("適当なチーム名・氏名が入ったサンプルExcelをダウンロードできます（個人情報なし）")
+        sample_bytes = scheduler.build_team_list_sample_bytes()
+        st.download_button(
+            label="チーム一覧サンプル（ダミーデータ）をダウンロード",
+            data=sample_bytes,
+            file_name="チームリスト_サンプル.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+
     uploaded = st.file_uploader("チーム一覧Excel (.xlsx)", type=["xlsx"]) 
 
     courts = st.number_input("コート数", min_value=1, max_value=60, value=15, step=1)
     num_rounds = st.number_input("ラウンド数", min_value=1, max_value=200, value=23, step=1)
+    start_time = st.text_input("開始時刻 (HH:MM)", value="12:50")
+    round_minutes = st.number_input("1ラウンドの時間（分）", min_value=1, max_value=180, value=13, step=1)
     matches_per_team = st.number_input("各ペアの試合数 (0=自動)", min_value=0, max_value=30, value=0, step=1)
 
     diversity_attempts = st.number_input("分散最大化の試行回数", min_value=1, max_value=50, value=1, step=1)
@@ -90,6 +112,8 @@ if run:
                     allow_court_gaps=bool(allow_court_gaps),
                     matches_per_team=int(matches_per_team),
                     html_passcode=str(html_passcode),
+                    start_time=str(start_time),
+                    round_minutes=int(round_minutes),
                 )
 
                 # Find generated files (timestamped).
