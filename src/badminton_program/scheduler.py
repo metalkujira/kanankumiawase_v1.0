@@ -4405,14 +4405,47 @@ def load_schedule_from_xlsx(schedule_xlsx: str, *, fallback_start_time_hhmm: str
 
     matches: list[Match] = []
     detected_rounds: set[int] = set()
+
+    def parse_round_number(value: Any) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, int):
+            return int(value)
+        if isinstance(value, float):
+            # openpyxl may return numeric cells as float
+            if value.is_integer():
+                return int(value)
+            return None
+        if isinstance(value, str):
+            s = value.strip()
+            if not s:
+                return None
+            # Accept plain digits or strings like '第12試合'
+            try:
+                return int(s)
+            except Exception:
+                pass
+            import re
+
+            m = re.search(r"\d+", s)
+            if not m:
+                return None
+            try:
+                return int(m.group(0))
+            except Exception:
+                return None
+        return None
+
     for row_idx in range(2, ws.max_row + 1):
         round_val = ws.cell(row=row_idx, column=1).value
         if round_val is None or str(round_val).strip() == "":
             continue
-        try:
-            round_num = int(round_val)
-        except Exception as e:
-            raise ValueError(f"対戦表の試合番号が不正です: row={row_idx} value={round_val}") from e
+
+        # The exported Excel can contain footer/summary rows (e.g. '表示試合数').
+        # Treat only rows with a parsable round number as match rows.
+        round_num = parse_round_number(round_val)
+        if round_num is None:
+            continue
         detected_rounds.add(round_num)
 
         start_raw = ws.cell(row=row_idx, column=2).value
