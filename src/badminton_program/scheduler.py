@@ -4025,6 +4025,7 @@ tbody tr:nth-child(even) td.sticky-col {background: #fff;}
 small {color: #666;}
 .team-meta {font-weight: 600;}
 .wrap {overflow-x: auto; -webkit-overflow-scrolling: touch; max-width: 100%; box-shadow: inset 0 0 0 1px #f0f0f0; border-radius: 4px;}
+.wrap table {width: max-content;}
 .filter-bar {display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 8px;}
 .filter-bar label {display: flex; align-items: center; gap: 4px; font-size: 13px;}
 input[type='search'] {padding: 4px 6px; font-size: 13px; border: 1px solid #bbb; border-radius: 4px;}
@@ -4051,8 +4052,9 @@ body.locked > :not(#lock-overlay) {filter: blur(2px); pointer-events: none; user
 }
 .sticky-col {position: -webkit-sticky; position: sticky; box-shadow: inset -1px 0 0 rgba(0,0,0,0.08);}
 td.sticky-col {background: #fff;}
-#match-matrix, #short-team, #short-round, #personal-schedule {table-layout: fixed;}
-#match-matrix td:not(.sticky-col), #short-team td:not(.sticky-col), #short-round td:not(.sticky-col), #personal-schedule td:not(.sticky-col) {white-space: normal; word-break: break-word; overflow-wrap: anywhere;}
+#short-team, #short-round {table-layout: fixed;}
+#match-matrix, #personal-schedule {table-layout: auto;}
+#match-matrix td:not(.sticky-col), #short-team td:not(.sticky-col), #short-round td:not(.sticky-col), #personal-schedule td:not(.sticky-col) {white-space: normal; word-break: break-word; overflow-wrap: break-word;}
 #match-matrix .match-col, #short-team .round-col, #short-round .round-col, #short-team .court-col, #short-round .court-col {white-space: nowrap;}
 #match-matrix .match-col {left: 0; min-width: var(--match-col-width); max-width: var(--match-col-width);}
 #short-team .round-col, #short-round .round-col {left: 0; min-width: var(--short-round-width); max-width: var(--short-round-width);}
@@ -4078,6 +4080,10 @@ td.sticky-col {background: #fff;}
         font-size: 11px;
         line-height: 1.1;
     }
+
+    /* iPhone: avoid 1-char wrapping by giving each round/court column a minimum width and scrolling horizontally */
+    #personal-schedule th:not(.sticky-col), #personal-schedule td:not(.sticky-col) {min-width: 92px;}
+    #match-matrix th:not(.sticky-col), #match-matrix td:not(.sticky-col) {min-width: 110px;}
 }
 </style>
         """
