@@ -13,6 +13,7 @@ out/
 *.xlsm
 *.html
 *.txt
+!requirements.txt
 
 # Local/OS
 .DS_Store

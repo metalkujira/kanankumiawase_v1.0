@@ -15,7 +15,6 @@ st.title("Badminton Scheduler")
 st.caption("Excelのチームリストをアップロードして、コート数/ラウンド数/各ペア試合数を指定して生成します。")
 st.warning(
     "公開運用の注意: アップロードされたExcelはサーバー側で処理されます。個人情報が含まれる場合は匿名化/最小化してからアップロードしてください。",
-    icon="⚠️",
 )
 
 with st.sidebar:
