@@ -3766,7 +3766,8 @@ def write_personal_schedule_html(matches: List[Match], teams: List[Team], output
         for court in range(1, courts + 1):
             match = next((m for m in matches if m.round_num == round_num and m.court == court), None)
             if match:
-                row.append((f"{match.team1.name} vs {match.team2.name}", False))
+                # iPhone等でヘッダー(コート番号)が見えなくなることがあるため、セル側にもコート番号を入れておく
+                row.append((f"C{court} {match.team1.name} vs {match.team2.name}", False))
                 clubs_in_round.add(match.team1.group)
                 clubs_in_round.add(match.team2.group)
                 teams_in_round.add(match.team1.name)
@@ -3997,7 +3998,7 @@ h1 {margin-bottom: 8px;}
 h2 {margin: 32px 0 8px;}
 table {border-collapse: collapse; width: 100%; font-size: 12px; min-width: 620px;}
 th, td {border: 1px solid #ddd; padding: 4px 6px; vertical-align: top; background-clip: padding-box;}
-th {position: sticky; top: 0; background: #f7f7f7; z-index: 4;}
+th {position: -webkit-sticky; position: sticky; top: 0; background: #f7f7f7; z-index: 4;}
 th.sticky-col {z-index: 6;}
 td.sticky-col {z-index: 2;}
 tbody tr:nth-child(odd) {background: #fafafa;}
@@ -4005,7 +4006,7 @@ tbody tr:nth-child(odd) td.sticky-col {background: #fdfdfd;}
 tbody tr:nth-child(even) td.sticky-col {background: #fff;}
 small {color: #666;}
 .team-meta {font-weight: 600;}
-.wrap {overflow-x: auto; max-width: 100%; box-shadow: inset 0 0 0 1px #f0f0f0; border-radius: 4px;}
+.wrap {overflow-x: auto; -webkit-overflow-scrolling: touch; max-width: 100%; box-shadow: inset 0 0 0 1px #f0f0f0; border-radius: 4px;}
 .filter-bar {display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 8px;}
 .filter-bar label {display: flex; align-items: center; gap: 4px; font-size: 13px;}
 input[type='search'] {padding: 4px 6px; font-size: 13px; border: 1px solid #bbb; border-radius: 4px;}
@@ -4030,7 +4031,7 @@ body.locked > :not(#lock-overlay) {filter: blur(2px); pointer-events: none; user
 #personal-schedule th.team-col, #personal-schedule th.member-col {
     background: #f0f0f0;
 }
-.sticky-col {position: sticky; box-shadow: inset -1px 0 0 rgba(0,0,0,0.08);}
+.sticky-col {position: -webkit-sticky; position: sticky; box-shadow: inset -1px 0 0 rgba(0,0,0,0.08);}
 td.sticky-col {background: #fff;}
 #match-matrix, #short-team, #short-round {table-layout: fixed;}
 #match-matrix td:not(.sticky-col), #short-team td:not(.sticky-col), #short-round td:not(.sticky-col) {white-space: normal; word-break: break-word;}
@@ -4040,13 +4041,14 @@ td.sticky-col {background: #fff;}
 #short-team .court-col, #short-round .court-col {left: var(--short-round-width); min-width: var(--short-court-width); max-width: var(--short-court-width);}
 #personal-schedule .team-col {left: 0; min-width: var(--personal-team-width); max-width: var(--personal-team-width);}
 #personal-schedule .member-col {left: var(--personal-team-width); min-width: var(--personal-member-width); max-width: var(--personal-member-width);}
+#personal-schedule .team-col, #personal-schedule .member-col {white-space: normal; word-break: break-word;}
 @media (max-width: 768px) {
     :root {
         --match-col-width: 84px;
         --short-round-width: 80px;
         --short-court-width: 56px;
-        --personal-team-width: 140px;
-        --personal-member-width: 190px;
+        --personal-team-width: 96px;
+        --personal-member-width: 128px;
     }
     body {margin: 12px;}
     table {font-size: 11px; min-width: 520px;}
