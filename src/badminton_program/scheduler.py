@@ -4409,9 +4409,9 @@ def generate_schedule(
                     print(f"修復後も残る衝突: {len(after)}")
             # Ensure we never exceed physical court capacity even if collision repair is imperfect.
             matches = normalize_round_capacity(matches, num_rounds, courts)
+            matches = ensure_round_one_full(matches, num_rounds, courts)
             if not allow_court_gaps:
                 matches = eliminate_mid_session_court_gaps(matches, num_rounds, courts)
-            matches = ensure_round_one_full(matches, num_rounds, courts)
             matches = compact_court_usage(matches, num_rounds, courts)
 
             def _max_team_streak(ms: List[Match]) -> int:
@@ -4441,9 +4441,9 @@ def generate_schedule(
                         break
                     ms = reduce_max_consecutive_streak(ms, num_rounds, courts, max_consecutive=limit)
                     ms = normalize_round_capacity(ms, num_rounds, courts)
+                    ms = ensure_round_one_full(ms, num_rounds, courts)
                     if not allow_court_gaps:
                         ms = eliminate_mid_session_court_gaps(ms, num_rounds, courts)
-                    ms = ensure_round_one_full(ms, num_rounds, courts)
                     ms = compact_court_usage(ms, num_rounds, courts)
                 return ms
 
