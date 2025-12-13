@@ -77,6 +77,10 @@ GitHubの画面から「コート数・ラウンド数・各ペア試合数」�
 
 このリポジトリには簡易Streamlitアプリ [app.py](app.py) を含めています。
 
+合言葉（簡易アクセス制限）:
+- デフォルトは `1234` です。
+- Streamlit Cloud の `Secrets` に `APP_PASSCODE` を設定すると変更できます。
+
 ローカル起動:
 
 ```powershell

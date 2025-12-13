@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import io
 import tempfile
 from pathlib import Path
 
@@ -16,6 +15,32 @@ st.caption("Excelのチームリストをアップロードして、コート数
 st.warning(
     "公開運用の注意: アップロードされたExcelはサーバー側で処理されます。個人情報が含まれる場合は匿名化/最小化してからアップロードしてください。",
 )
+
+
+def _expected_app_passcode() -> str:
+    # Default is '1234' as a minimal gate; override via Streamlit Secrets (APP_PASSCODE).
+    try:
+        return str(st.secrets.get("APP_PASSCODE", "1234"))
+    except Exception:
+        return "1234"
+
+
+if "authed" not in st.session_state:
+    st.session_state.authed = False
+
+expected_passcode = _expected_app_passcode()
+
+with st.sidebar:
+    st.header("アクセス")
+    entered = st.text_input("合言葉", value="", type="password")
+    if st.button("解除", use_container_width=True):
+        st.session_state.authed = (entered == expected_passcode)
+        if not st.session_state.authed:
+            st.error("合言葉が違います")
+
+if not st.session_state.authed:
+    st.info("合言葉を入力して解除してください")
+    st.stop()
 
 with st.sidebar:
     st.header("設定")
