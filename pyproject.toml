@@ -1,0 +1,27 @@
+[project]
+name = "badminton-scheduler"
+version = "0.1.0"
+description = "Badminton pairing & court scheduling tool"
+readme = "README.md"
+authors = [ { name = "User" } ]
+license = { text = "Proprietary" }
+requires-python = ">=3.10"
+dependencies = [
+  "pandas>=2.0",
+  "openpyxl",
+  "typer>=0.9",
+  "rich>=13.0"
+]
+
+[project.scripts]
+bsched = "badminton_program.cli:app"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"

@@ -1,0 +1,72 @@
+# Badminton Scheduler
+
+バドミントンの交流会向けに、同レベル・同グループ回避などの条件を守りつつ、対戦表（Excel）と閲覧用HTMLを生成するツールです。
+
+## できること（運用でよく使う指定）
+
+- コート数を指定して生成（`--courts`）
+- ラウンド数（=全体の試合枠）を指定して生成（`--num-rounds`）
+- 各ペアの試合数を「自動」または「固定」で指定（`--matches-per-team`）
+  - `0` = 自動（全員同じ試合数を最優先し、容量内で成立する最大値を選びます）
+  - `6` = 固定6試合、など
+
+※容量の考え方: `容量 = num_rounds * courts`、必要試合数は `必要 = (ペア数 * 目標試合数) / 2` です。
+
+## セットアップ
+
+Python 3.10+ が必要です。
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -U pip
+pip install -e .
+```
+
+## 使い方
+
+### 1) まずヘルプ確認
+
+```powershell
+bsched --help
+```
+
+（リポジトリ直下で実行する場合は `python -m badminton_program.scheduler --help` でもOKです）
+
+### 2) 例: 15面・23ラウンド・6試合固定で生成
+
+```powershell
+bsched --input-file "チームリスト.xlsx" --output-file "schedule.xlsx" --courts 15 --num-rounds 23 --matches-per-team 6
+```
+
+### 3) 例: 各ペア試合数は自動（0）で生成
+
+```powershell
+bsched --input-file "チームリスト.xlsx" --output-file "schedule.xlsx" --courts 15 --num-rounds 23 --matches-per-team 0
+```
+
+### 4) HTMLを簡易ロック付きで生成（静的HTML）
+
+```powershell
+bsched --input-file "チームリスト.xlsx" --output-file "schedule.xlsx" --courts 15 --num-rounds 23 --matches-per-team 6 --html-passcode "1234"
+```
+
+注意: これは「簡易ロック」です（完全な暗号化ではありません）。
+
+## 入力ファイル
+
+- `チームリスト.xlsx` を入力にします（列名などはサンプルを参照してください）。
+
+## 公開（GitHub）について
+
+- `pyproject.toml` の `license` は現在 `Proprietary` になっています。公開するなら、意図に合わせてライセンス表記の見直しが必要です。
+- 個人情報が入る可能性があるため、入力Excelや出力HTML/Excelをそのままリポジトリに含めない運用を推奨します（`.gitignore`推奨）。
+
+## GitHub上で入力して実行（Actions）
+
+GitHubの画面から「コート数・ラウンド数・各ペア試合数」などを入力して実行し、生成されたExcel/HTMLをArtifactsからダウンロードできます。
+
+1. リポジトリに `チームリスト.xlsx` を置く（または入力パスを変更）
+2. GitHub → `Actions` → `Generate Schedule` → `Run workflow`
+3. 入力欄に `courts`, `num_rounds`, `matches_per_team` などを入れて実行
+4. 実行結果ページの `Artifacts` から `schedule-output` をダウンロード
