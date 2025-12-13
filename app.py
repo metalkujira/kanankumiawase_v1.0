@@ -86,6 +86,16 @@ with st.sidebar:
 
     html_passcode = st.text_input("HTML簡易ロック用パスコード（任意）", value="", type="password")
 
+    html_include_members = st.checkbox(
+        "生成HTMLに選手名（氏名）を含める",
+        value=False,
+        help="ONにすると個人情報が含まれます。公開URLでの配布は避け、配布先を限定してください。",
+    )
+    if html_include_members:
+        st.warning("注意: 選手名（氏名）を含むHTMLを生成します。公開URLでの配布は避け、配布先を限定してください。")
+    else:
+        st.info("個人情報対策: 生成HTMLは選手名（氏名）を表示しません（ペア名のみ）。")
+
     run = st.button("生成", type="primary", use_container_width=True)
 
     st.divider()
@@ -161,7 +171,7 @@ if run:
 
                 xlsx_path = xlsx_files[-1]
 
-                # Streamlitでは個人情報対策として、HTMLは常に「選手名なし」で再生成する。
+                # Streamlitでは、HTMLに選手名を含めるか選択できる。
                 safe_html_path = xlsx_path.with_suffix(".html")
                 matches, teams, inferred_rounds, inferred_courts = scheduler.load_schedule_from_xlsx(
                     str(xlsx_path),
@@ -177,7 +187,7 @@ if run:
                     html_passcode=(str(html_passcode) or None),
                     start_time_hhmm=str(start_time),
                     round_minutes=int(round_minutes),
-                    include_members=False,
+                    include_members=bool(html_include_members),
                 )
 
                 excel_bytes = _read_bytes(xlsx_path)

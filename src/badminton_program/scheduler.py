@@ -4066,7 +4066,7 @@ td.sticky-col {background: #fff;}
         --short-round-width: 80px;
         --short-court-width: 56px;
         --personal-team-width: 56px;
-        --personal-member-width: 78px;
+        --personal-member-width: 120px;
     }
     body {margin: 12px;}
     table {font-size: 11px; min-width: 420px;}
@@ -4075,8 +4075,8 @@ td.sticky-col {background: #fff;}
     #personal-schedule td.team-col, #personal-schedule td.member-col,
     #personal-schedule th.team-col, #personal-schedule th.member-col {
         padding: 2px 3px;
-        font-size: 10px;
-        line-height: 1.05;
+        font-size: 11px;
+        line-height: 1.1;
     }
 }
 </style>
