@@ -86,6 +86,13 @@ def _read_bytes(p: Path) -> bytes:
     return p.read_bytes()
 
 
+def _set_last_outputs(*, excel_name: str, excel_bytes: bytes, html_name: str | None, html_bytes: bytes | None) -> None:
+    st.session_state.last_excel_name = excel_name
+    st.session_state.last_excel_bytes = excel_bytes
+    st.session_state.last_html_name = html_name
+    st.session_state.last_html_bytes = html_bytes
+
+
 if run:
     if uploaded is None:
         st.error("チーム一覧Excelをアップロードしてください")
@@ -129,34 +136,45 @@ if run:
                 excel_bytes = _read_bytes(xlsx_path)
                 html_bytes = _read_bytes(html_path) if html_path else b""
 
+            _set_last_outputs(
+                excel_name=xlsx_path.name,
+                excel_bytes=excel_bytes,
+                html_name=(html_path.name if html_path is not None else None),
+                html_bytes=(html_bytes if html_path is not None else None),
+            )
+
             status.update(label="生成完了", state="complete", expanded=False)
 
-            st.success("生成しました。ダウンロードしてください。")
-
-            col1, col2 = st.columns(2)
-            with col1:
-                st.download_button(
-                    "Excelをダウンロード",
-                    data=excel_bytes,
-                    file_name=xlsx_path.name,
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True,
-                )
-            with col2:
-                if html_path is not None:
-                    st.download_button(
-                        "HTMLをダウンロード",
-                        data=html_bytes,
-                        file_name=html_path.name,
-                        mime="text/html",
-                        use_container_width=True,
-                    )
-                else:
-                    st.info("HTML出力はありませんでした")
-
-            st.divider()
-            st.caption("注意: HTMLの簡易ロックは暗号化ではありません。配布先は限定してください。")
+            st.success("生成しました。右側のダウンロードからExcel/HTMLを取得できます。")
 
         except Exception as e:
             status.update(label="失敗", state="error")
             st.exception(e)
+
+
+if "last_excel_bytes" in st.session_state:
+    st.markdown("### ダウンロード")
+    st.caption("生成結果はサーバーにファイルとしては残さず、このブラウザのセッション内メモリで保持します（再読み込みすると消えます）。")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.download_button(
+            "Excelをダウンロード",
+            data=st.session_state.last_excel_bytes,
+            file_name=st.session_state.last_excel_name,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+    with col2:
+        if st.session_state.get("last_html_bytes") and st.session_state.get("last_html_name"):
+            st.download_button(
+                "HTMLをダウンロード",
+                data=st.session_state.last_html_bytes,
+                file_name=st.session_state.last_html_name,
+                mime="text/html",
+                use_container_width=True,
+            )
+        else:
+            st.info("HTML出力はありませんでした")
+
+    st.divider()
+    st.caption("注意: HTMLの簡易ロックは暗号化ではありません。配布先は限定してください。")
