@@ -6390,7 +6390,7 @@ def generate_schedule(
     ),
     matches_per_team: int = typer.Option(0, help="各ペアの試合数。0で自動（全員同数を最優先）。例: 6"),
     html_passcode: str = typer.Option("", help="HTMLの簡易ロック用パスコード（注意: 完全な暗号化ではありません）"),
-    include_members: bool = typer.Option(False, help="HTMLに選手名（氏名）を含める（対戦表/短縮/個人に反映。通常はOFF推奨）"),
+    include_members: bool = typer.Option(True, help="HTMLに選手名（氏名）を含める（対戦表/短縮/個人に反映）"),
     wall_html: bool = typer.Option(False, help="壁貼り用（コート別）HTMLも出力する（印刷前提・JS不要）"),
     wall_courts_per_page: int = typer.Option(2, help="壁貼り用HTMLの1ページあたりコート数（1〜3推奨）。標準は2"),
     wall_team_color: list[str] = typer.Option(
@@ -6409,8 +6409,8 @@ def generate_schedule(
         help="壁貼り用HTMLのチームセル背景色を塗る（デフォルトOFF）。背景印刷がOFFになりがちなのでOFF推奨",
     ),
     excel_include_members: bool = typer.Option(False, help="Excelの『対戦表』セルに選手名（氏名）を改行で表示する（手修正しやすい。配布する場合は注意）"),
-    excel_members_below: bool = typer.Option(False, help="Excelの『対戦表』を2行構成にする（上=ペア名、下=選手名）。手修正/老眼運用向け"),
-    excel_members_vlookup: bool = typer.Option(False, help="『選手名』行をペア一覧からVLOOKUPで自動表示する（ペア名セルをキー）。※Excelで開いて計算が必要"),
+    excel_members_below: bool = typer.Option(True, help="Excelの『対戦表』を2行構成にする（上=ペア名、下=選手名）"),
+    excel_members_vlookup: bool = typer.Option(True, help="『選手名』行をペア一覧からVLOOKUPで自動表示する（ペア名セルをキー）。※Excelで開いて計算が必要"),
     start_time: str = typer.Option(DEFAULT_START_TIME_HHMM, help="開始時刻 (HH:MM)"),
     round_minutes: int = typer.Option(DEFAULT_ROUND_MINUTES, help="1ラウンドの時間（分）"),
 ):
@@ -6923,8 +6923,8 @@ def release_from_summary(
     round_minutes: int = typer.Option(DEFAULT_ROUND_MINUTES, help="終了時刻の計算に使う（分）"),
     allow_court_gaps: bool = typer.Option(True, help="空きコートを許容する（集計表由来ではON推奨）"),
     excel_include_members: bool = typer.Option(False, help="Excelの『対戦表』セルに選手名（氏名）を改行で表示する"),
-    excel_members_below: bool = typer.Option(False, help="Excelの『対戦表』を2行構成にする（上=ペア名、下=選手名）"),
-    excel_members_vlookup: bool = typer.Option(False, help="『選手名』行をペア一覧からVLOOKUPで自動表示する（要Excel再計算）"),
+    excel_members_below: bool = typer.Option(True, help="Excelの『対戦表』を2行構成にする（上=ペア名、下=選手名）"),
+    excel_members_vlookup: bool = typer.Option(True, help="『選手名』行をペア一覧からVLOOKUPで自動表示する（要Excel再計算）"),
     start_time: str = typer.Option(DEFAULT_START_TIME_HHMM, help="開始時刻 (HH:MM) ※時間列が欠けている場合の補助"),
 ):
     """集計表（短縮一覧）から、最終配布セットを一発で出力。
@@ -7043,7 +7043,7 @@ def release_from_team_list(
     ),
     matches_per_team: int = typer.Option(0, help="各ペアの試合数。0で自動"),
     html_passcode: str = typer.Option("", help="HTMLの簡易ロック用パスコード（注意: 完全な暗号化ではありません）"),
-    include_members_html: bool = typer.Option(False, help="HTMLに選手名（氏名）を含める。通常はOFF推奨"),
+    include_members_html: bool = typer.Option(True, help="HTMLに選手名（氏名）を含める"),
     wall_courts_per_page: int = typer.Option(2, help="壁貼り用HTMLの1ページあたりコート数（標準2）"),
     wall_team_color: list[str] = typer.Option(
         [],
@@ -7060,8 +7060,8 @@ def release_from_team_list(
     score_sheets_columns: int = typer.Option(2, help="得点記入表の列数（標準2）"),
     score_sheets_include_members: bool = typer.Option(True, help="得点記入表に選手名（氏名）も入れる"),
     excel_include_members: bool = typer.Option(False, help="Excelの『対戦表』セルに選手名（氏名）を改行で表示する"),
-    excel_members_below: bool = typer.Option(False, help="Excelの『対戦表』を2行構成にする（上=ペア名、下=選手名）"),
-    excel_members_vlookup: bool = typer.Option(False, help="『選手名』行をペア一覧からVLOOKUPで自動表示する（要Excel再計算）"),
+    excel_members_below: bool = typer.Option(True, help="Excelの『対戦表』を2行構成にする（上=ペア名、下=選手名）"),
+    excel_members_vlookup: bool = typer.Option(True, help="『選手名』行をペア一覧からVLOOKUPで自動表示する（要Excel再計算）"),
     start_time: str = typer.Option(DEFAULT_START_TIME_HHMM, help="開始時刻 (HH:MM)"),
     round_minutes: int = typer.Option(DEFAULT_ROUND_MINUTES, help="1ラウンドの時間（分）"),
 ):

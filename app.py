@@ -86,9 +86,9 @@ with st.sidebar:
 
     html_passcode = st.text_input("HTML簡易ロック用パスコード（任意）", value="", type="password")
 
-    html_include_members = st.checkbox(
-        "生成HTMLに選手名（氏名）を含める",
-        value=False,
+        html_include_members = st.checkbox(
+            "生成HTMLに選手名（氏名）を含める",
+            value=True,
         help="ONにすると個人情報が含まれます。公開URLでの配布は避け、配布先を限定してください。",
     )
     if html_include_members:
@@ -102,9 +102,9 @@ with st.sidebar:
     st.header("編集後Excel→HTML再生成")
     st.caption("編集したスケジュールExcel（対戦表/ペア一覧）をアップロードして、HTMLを作り直します。")
     edited_schedule = st.file_uploader("編集後スケジュールExcel (.xlsx)", type=["xlsx"], key="edited_schedule_xlsx")
-    regen_include_members = st.checkbox(
-        "HTMLに選手名（氏名）を含める",
-        value=False,
+        regen_include_members = st.checkbox(
+            "HTMLに選手名（氏名）を含める",
+            value=True,
         help="ONにすると個人情報が含まれます。サーバ側で処理される点に注意してください。",
     )
     if regen_include_members:
