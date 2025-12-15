@@ -67,6 +67,20 @@ with st.sidebar:
         use_container_width=True,
     )
 
+    st.markdown("### サンプル（編集後スケジュールExcel）")
+    st.caption("『編集後Excel→HTML再生成』に入れるファイル例です（個人情報なしのダミー）。")
+    filled_sample_path = Path(__file__).resolve().parent / "samples" / "チームリスト_サンプル_filled.xlsx"
+    if filled_sample_path.exists():
+        st.download_button(
+            label="編集後スケジュールExcelサンプルをダウンロード",
+            data=filled_sample_path.read_bytes(),
+            file_name="チームリスト_サンプル_filled.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+    else:
+        st.caption("（サンプルファイルが見つからないため、この環境では表示できません）")
+
     uploaded = st.file_uploader("チーム一覧Excel (.xlsx)", type=["xlsx"], key="teams_xlsx")
 
     courts = st.number_input("コート数", min_value=1, max_value=60, value=15, step=1)
@@ -103,6 +117,7 @@ with st.sidebar:
     st.divider()
     st.header("編集後Excel→HTML再生成")
     st.caption("編集したスケジュールExcel（対戦表/ペア一覧）をアップロードして、HTMLを作り直します。")
+    st.caption("※集計表（xlsm）を使う運用の人は、Excelマクロで『対戦一覧_短縮』を必ず最新にして保存してから使ってください（古いままだと古い対戦が出ます）。")
     edited_schedule = st.file_uploader("編集後スケジュールExcel (.xlsx)", type=["xlsx"], key="edited_schedule_xlsx")
 
     regen_include_members = st.checkbox(

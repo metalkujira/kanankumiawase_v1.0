@@ -239,6 +239,9 @@ Streamlit Cloud / GitHub Actions などの「オンライン実行」では、Ex
 そこに「試合/コート/時間/ペア名/選手名/相手ペア名/相手選手名」が揃っているなら、
 **そのxlsmを入力にして、最終Excel+HTMLを直接作る**のが一番混乱が少ないです。
 
+重要: 集計表（xlsm）を入力にする場合は、**Excelでマクロを実行して `対戦一覧_短縮` を最新に更新し、保存してから** 実行してください。
+（`対戦一覧_短縮` が古いままだと、出力も古い対戦内容になります）
+
 ```powershell
 python -m badminton_program.scheduler export-from-summary --input-file "集計表.xlsm" --sheet-name "対戦一覧_短縮" --wall-html --wall-courts-per-page 3
 ```
