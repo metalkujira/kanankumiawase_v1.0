@@ -12,8 +12,10 @@ st.set_page_config(page_title="Badminton Scheduler", layout="wide")
 
 st.title("Badminton Scheduler")
 st.caption("Excelのチームリストをアップロードして、コート数/ラウンド数/各ペア試合数を指定して生成します。")
-st.warning(
-    "公開運用の注意: アップロードされたExcelはサーバー側で処理されます。アプリ側では一時ディレクトリで処理して終了後に削除しますが、基盤（Streamlit Cloud等）のログ/監視/バックアップ等まで含めて完全な削除を保証はできません。個人情報は匿名化/最小化してからアップロードしてください。",
+st.info(
+    "データ取り扱い（公開運用の注意）: アップロードされたExcelと、生成されるExcel/HTMLはサーバー側で処理されます。\n"
+    "アプリ側では一時ディレクトリに保存して処理し、処理完了後に削除します（ダウンロード用データはこの画面のセッション中だけ保持）。\n"
+    "ただし、基盤（Streamlit Cloud等）のログ/監視/バックアップ等まで含めて完全な削除を保証はできません。個人情報の扱い（配布先/公開範囲）は必ず決めてください。"
 )
 
 
@@ -65,7 +67,7 @@ with st.sidebar:
         use_container_width=True,
     )
 
-    uploaded = st.file_uploader("チーム一覧Excel (.xlsx)", type=["xlsx"], key="teams_xlsx") 
+    uploaded = st.file_uploader("チーム一覧Excel (.xlsx)", type=["xlsx"], key="teams_xlsx")
 
     courts = st.number_input("コート数", min_value=1, max_value=60, value=15, step=1)
     num_rounds = st.number_input("ラウンド数", min_value=1, max_value=200, value=23, step=1)
@@ -86,15 +88,15 @@ with st.sidebar:
 
     html_passcode = st.text_input("HTML簡易ロック用パスコード（任意）", value="", type="password")
 
-        html_include_members = st.checkbox(
-            "生成HTMLに選手名（氏名）を含める",
-            value=True,
-        help="ONにすると個人情報が含まれます。公開URLでの配布は避け、配布先を限定してください。",
+    html_include_members = st.checkbox(
+        "生成HTMLに選手名（氏名）を含める（標準ON）",
+        value=True,
+        help="ONにすると個人情報が含まれます。配布先（共有範囲）を限定してください。",
     )
     if html_include_members:
-        st.warning("注意: 選手名（氏名）を含むHTMLを生成します。公開URLでの配布は避け、配布先を限定してください。")
+        st.caption("注記: 名前入りで生成します。公開URLでの配布は避け、配布先を限定してください。")
     else:
-        st.info("個人情報対策: 生成HTMLは選手名（氏名）を表示しません（ペア名のみ）。")
+        st.caption("注記: 名前なし（ペア名のみ）で生成します。公開配布向きです。")
 
     run = st.button("生成", type="primary", use_container_width=True)
 
@@ -102,15 +104,16 @@ with st.sidebar:
     st.header("編集後Excel→HTML再生成")
     st.caption("編集したスケジュールExcel（対戦表/ペア一覧）をアップロードして、HTMLを作り直します。")
     edited_schedule = st.file_uploader("編集後スケジュールExcel (.xlsx)", type=["xlsx"], key="edited_schedule_xlsx")
-        regen_include_members = st.checkbox(
-            "HTMLに選手名（氏名）を含める",
-            value=True,
-        help="ONにすると個人情報が含まれます。サーバ側で処理される点に注意してください。",
+
+    regen_include_members = st.checkbox(
+        "HTMLに選手名（氏名）を含める（標準ON）",
+        value=True,
+        help="ONにすると個人情報が含まれます。配布先（共有範囲）を限定してください。",
     )
     if regen_include_members:
-        st.warning("注意: 選手名（氏名）を含むHTMLを生成します。公開URLでの配布は避け、配布先を限定してください。")
+        st.caption("注記: 名前入りで再生成します。公開URLでの配布は避け、配布先を限定してください。")
     else:
-        st.info("個人情報対策: 選手名（氏名）を表示しません（ペア名のみ）。")
+        st.caption("注記: 名前なし（ペア名のみ）で再生成します。公開配布向きです。")
     regen_passcode = st.text_input("再生成HTMLのパスコード（任意）", value="", type="password", key="regen_html_pass")
 
     st.markdown("#### 追加出力（任意）")
