@@ -1,1 +1,6 @@
--e .
+streamlit>=1.36
+pandas>=2.0
+openpyxl
+typer>=0.9
+rich>=13.0
+.

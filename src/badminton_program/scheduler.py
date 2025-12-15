@@ -11,6 +11,8 @@ from collections import defaultdict, Counter
 from html import escape
 import math
 import hashlib
+import json
+import warnings
 from io import BytesIO
 
 
@@ -21,11 +23,8 @@ TEAM_LIST_TEMPLATE_SHEET_NAME = "チーム一覧"
 TEAM_LIST_TEMPLATE_HEADERS = [
     "ペア名",
     "氏名",
-    "レベル",
-    "グループ",
-    "優先1",
-    "優先2",
-    "優先3",
+    "優先対戦",
+    "優先対戦相手",
 ]
 
 
@@ -36,30 +35,30 @@ TEAM_LIST_SAMPLE_HEADERS = TEAM_LIST_TEMPLATE_HEADERS
 def build_team_list_sample_rows() -> List[List[str]]:
     """Return dummy rows with clearly non-personal placeholder data."""
 
-    def row(pair: str, members: str, level: str, group: str) -> List[str]:
-        return [pair, members, level, group, "", "", ""]
+    def row(pair: str, members: str) -> List[str]:
+        return [pair, members, "", ""]
 
     rows: List[List[str]] = []
     # A: 4 teams (unique groups)
     rows += [
-        row("サンプルA1", "TEST_A1P1, TEST_A1P2", "A", "クラブA1"),
-        row("サンプルA2", "TEST_A2P1, TEST_A2P2", "A", "クラブA2"),
-        row("サンプルA3", "TEST_A3P1, TEST_A3P2", "A", "クラブA3"),
-        row("サンプルA4", "TEST_A4P1, TEST_A4P2", "A", "クラブA4"),
+        row("サンプルA1", "TEST_A1P1, TEST_A1P2"),
+        row("サンプルA2", "TEST_A2P1, TEST_A2P2"),
+        row("サンプルA3", "TEST_A3P1, TEST_A3P2"),
+        row("サンプルA4", "TEST_A4P1, TEST_A4P2"),
     ]
     # B: 4 teams (unique groups)
     rows += [
-        row("サンプルB1", "TEST_B1P1, TEST_B1P2", "B", "クラブB1"),
-        row("サンプルB2", "TEST_B2P1, TEST_B2P2", "B", "クラブB2"),
-        row("サンプルB3", "TEST_B3P1, TEST_B3P2", "B", "クラブB3"),
-        row("サンプルB4", "TEST_B4P1, TEST_B4P2", "B", "クラブB4"),
+        row("サンプルB1", "TEST_B1P1, TEST_B1P2"),
+        row("サンプルB2", "TEST_B2P1, TEST_B2P2"),
+        row("サンプルB3", "TEST_B3P1, TEST_B3P2"),
+        row("サンプルB4", "TEST_B4P1, TEST_B4P2"),
     ]
     # C: 4 teams (unique groups)
     rows += [
-        row("サンプルC1", "TEST_C1P1, TEST_C1P2", "C", "クラブC1"),
-        row("サンプルC2", "TEST_C2P1, TEST_C2P2", "C", "クラブC2"),
-        row("サンプルC3", "TEST_C3P1, TEST_C3P2", "C", "クラブC3"),
-        row("サンプルC4", "TEST_C4P1, TEST_C4P2", "C", "クラブC4"),
+        row("サンプルC1", "TEST_C1P1, TEST_C1P2"),
+        row("サンプルC2", "TEST_C2P1, TEST_C2P2"),
+        row("サンプルC3", "TEST_C3P1, TEST_C3P2"),
+        row("サンプルC4", "TEST_C4P1, TEST_C4P2"),
     ]
     return rows
 
@@ -175,6 +174,40 @@ def compute_auto_matches_per_team(num_teams: int, num_rounds: int, courts: int) 
     return max(0, m)
 
 
+def compute_hard_feasible_matches_per_team(teams: List[Team]) -> int:
+    """Compute an upper bound for matches-per-team under hard constraints.
+
+    Current hard model:
+    - Matches are only scheduled within the same level.
+    - Teams cannot play against the same group.
+
+    Therefore, for each team, the maximum number of distinct opponents is the
+    count of teams in the same level whose group differs. We take the minimum
+    across all teams as a safe global upper bound.
+
+    If group is missing for either side, we treat the pairing as allowed
+    (cannot enforce the constraint reliably).
+    """
+
+    if not teams:
+        return 0
+    by_level: Dict[str, List[Team]] = defaultdict(list)
+    for t in teams:
+        by_level[t.level].append(t)
+
+    caps: List[int] = []
+    for level_teams in by_level.values():
+        for t in level_teams:
+            possible = 0
+            for other in level_teams:
+                if other.name == t.name:
+                    continue
+                if not t.group or not other.group or (t.group != other.group):
+                    possible += 1
+            caps.append(possible)
+    return max(0, min(caps) if caps else 0)
+
+
 def expected_total_matches(num_teams: int, matches_per_team: int) -> int:
     return (num_teams * matches_per_team) // 2
 LEVEL_SEGMENTS = {
@@ -193,46 +226,184 @@ def load_teams(file_path: str) -> List[Team]:
         return []
     df = pd.DataFrame(data[1:], columns=data[0])
     teams: List[Team] = []
+
+    def _norm_header(v: Any) -> str:
+        if v is None:
+            return ""
+        return str(v).strip().replace("\u3000", " ")
+
+    def _pick_col(*, include_any: tuple[str, ...], exclude_any: tuple[str, ...] = ()) -> str | None:
+        """Pick the first matching column name by keyword containment.
+
+        This supports templates like:
+          - 'ペア名' / '氏名'
+          - 'ペア名 ↓値ばりで記入' / '氏名 ↓値ばりで記入'
+        """
+
+        for c in df.columns:
+            h = _norm_header(c)
+            if not h:
+                continue
+            if any(k in h for k in include_any) and not any(k in h for k in exclude_any):
+                return c
+        return None
+
+    col_pair = _pick_col(include_any=("ペア名", "ペア"), exclude_any=("相手",))
+    col_members = _pick_col(include_any=("氏名", "選手名"), exclude_any=("相手",))
+    col_level = _pick_col(include_any=("レベル",), exclude_any=("相手",))
+    col_group = _pick_col(include_any=("グループ",), exclude_any=("相手",))
+
+    if col_pair is None:
+        raise ValueError(
+            "チーム一覧の列 'ペア名' が見つかりません（例: 'ペア名', 'ペア名 ↓値ばりで記入'）。"
+            f" 実際のヘッダー: {[ _norm_header(c) for c in list(df.columns)[:12] ]}"
+        )
+    if col_members is None:
+        # Members can be empty, but the column should exist in our templates.
+        # Still, allow running without it by treating as empty.
+        col_members = ""
+
+    def _infer_level(name: str) -> str:
+        # Common naming: '上海A1' / '罗湖B8' / etc.
+        # Prefer a level letter that appears right before trailing digits.
+        import re
+
+        s = str(name)
+        m = re.search(r"([ABC])\d+$", s)
+        if m:
+            return m.group(1)
+        for ch in s:
+            if ch in "ABC":
+                return ch
+        return ""
+
+    def _infer_group(name: str) -> str:
+        # Common naming: strip trailing digits to get club/root.
+        try:
+            return str(name).rstrip("0123456789")
+        except Exception:
+            return ""
+
+    # Collect raw preference cells first; we'll filter after we know all team names.
+    raw_pref_by_team: dict[str, list[str]] = {}
+
     for _, row in df.iterrows():
-        name = str(row.get("ペア名", "") or "").strip()
+        name = str(row.get(col_pair, "") or "").strip()
         if not name:
             continue
-        members = str(row.get("氏名", "") or "").strip()
-        level = str(row.get("レベル", "") or "").strip()
-        group = str(row.get("グループ", "") or "").strip()
-        preferred: List[str] = []
-        pref_cols = [
-            c for c in df.columns
-            if isinstance(c, str) and any(keyword in c for keyword in ("優先", "希望", "対戦", "相手"))
-        ]
+        members = str(row.get(col_members, "") or "").strip() if col_members else ""
+        level = str(row.get(col_level, "") or "").strip() if col_level else ""
+        group = str(row.get(col_group, "") or "").strip() if col_group else ""
+        if not level:
+            level = _infer_level(name)
+        if not group:
+            group = _infer_group(name)
+
+        pref_candidates: List[str] = []
+        pref_cols = [c for c in df.columns if isinstance(c, str) and any(k in c for k in ("優先", "希望", "対戦", "相手"))]
         for col in pref_cols:
             val = row.get(col)
-            if isinstance(val, str):
-                val = val.strip()
-            if val and not pd.isna(val):
-                preferred.append(str(val))
-        try:
-            for idx in (5, 6):
-                if idx < len(df.columns):
-                    col_name = df.columns[idx]
-                    val = row.get(col_name)
-                    if isinstance(val, str):
-                        val = val.strip()
-                    if val and not pd.isna(val):
-                        sval = str(val)
-                        if sval not in preferred:
-                            preferred.append(sval)
-        except Exception:
-            pass
+            if val is None or (isinstance(val, float) and pd.isna(val)):
+                continue
+            sval = str(val).strip()
+            if not sval:
+                continue
+            pref_candidates.append(sval)
+        raw_pref_by_team[name] = pref_candidates
+
         teams.append(
             Team(
                 name=name,
                 members=members,
                 level=level,
                 group=group,
-                preferred_opponents=preferred,
+                preferred_opponents=[],
             )
         )
+
+    # Second pass: keep only values that look like actual opponent team names.
+    team_names: set[str] = {t.name for t in teams}
+
+    def _split_candidates(s: str) -> list[str]:
+        # Split on common separators; keep order.
+        import re
+
+        raw = str(s).replace("\r", "\n")
+        parts: list[str] = []
+        for chunk in re.split(r"[\n,、/|]+", raw):
+            v = chunk.strip()
+            if v:
+                parts.append(v)
+        return parts
+
+    def _extract_opponent_from_match_expr(expr: str, self_name: str) -> list[str]:
+        # Accept strings like 'A1 vs B1', 'A1-B1', 'A1対B1'.
+        import re
+
+        s = expr
+        for sep in (" vs ", " VS ", " Vs ", "-", "―", "−", "–", "—", "対", "ｖｓ", "vs"):
+            if sep in s:
+                left, right = s.split(sep, 1)
+                left = left.strip()
+                right = right.strip()
+                candidates = [left, right]
+                out: list[str] = []
+                for c in candidates:
+                    if c == self_name:
+                        continue
+                    if c in team_names:
+                        out.append(c)
+                return out
+        # Fallback: if the string contains self name and another known name, pick the other.
+        out: list[str] = []
+        if self_name and self_name in s:
+            for nm in team_names:
+                if nm != self_name and nm in s:
+                    out.append(nm)
+        # De-dupe while preserving order.
+        seen: set[str] = set()
+        uniq: list[str] = []
+        for x in out:
+            if x not in seen:
+                seen.add(x)
+                uniq.append(x)
+        return uniq
+
+    def _looks_like_marker(s: str) -> bool:
+        v = s.strip().lower()
+        if not v:
+            return True
+        if v in {"○", "●", "◎", "◯", "x", "×", "yes", "y", "true", "t", "1", "0", "ok", "ng"}:
+            return True
+        if v.isdigit() and len(v) <= 2:
+            return True
+        return False
+
+    by_name: dict[str, Team] = {t.name: t for t in teams}
+    for t in teams:
+        preferred: list[str] = []
+        for raw in raw_pref_by_team.get(t.name, []):
+            for token in _split_candidates(raw):
+                if _looks_like_marker(token):
+                    continue
+                if token in team_names:
+                    preferred.append(token)
+                    continue
+                preferred.extend(_extract_opponent_from_match_expr(token, t.name))
+
+        # Normalize
+        norm: list[str] = []
+        seen: set[str] = set()
+        for opp in preferred:
+            if opp == t.name:
+                continue
+            if opp not in team_names:
+                continue
+            if opp in seen:
+                continue
+            seen.add(opp)
+            norm.append(opp)
+        by_name[t.name].preferred_opponents = norm
     return teams
 
 ###################################################################################################
@@ -3177,6 +3348,10 @@ def write_to_excel_like_summary(
     courts: int,
     start_time_hhmm: str = DEFAULT_START_TIME_HHMM,
     round_minutes: int = DEFAULT_ROUND_MINUTES,
+    excel_include_members: bool = False,
+    excel_members_below: bool = False,
+    excel_members_vlookup: bool = False,
+    normalize_round_times: bool = True,
 ):
     wb = openpyxl.Workbook()
     from openpyxl.styles import PatternFill, Font, Border, Side, Alignment
@@ -3193,8 +3368,11 @@ def write_to_excel_like_summary(
     base_time = _base_datetime_from_hhmm(start_time_hhmm)
     round_duration = timedelta(minutes=int(round_minutes))
 
-    # Normalize all match timestamps for consistent Excel/HTML output.
-    apply_round_times(matches, start_time_hhmm=start_time_hhmm, round_minutes=int(round_minutes))
+    # Normalize timestamps for the standard generator outputs.
+    # When importing from an external "short list" sheet that already contains exact times,
+    # we must preserve the existing Match.start_time.
+    if normalize_round_times:
+        apply_round_times(matches, start_time_hhmm=start_time_hhmm, round_minutes=int(round_minutes))
 
     # Sheet 1: 集計表
     ws1 = wb.active
@@ -3218,6 +3396,36 @@ def write_to_excel_like_summary(
     for c in range(1, max_court + 1):
         header += [f"コート{c}-チーム1", f"コート{c}-チーム2"]
     ws2.append(header)
+
+    def render_excel_team_cell(team: Team | None) -> str:
+        if not team:
+            return ""
+        if (not excel_members_below) and excel_include_members and team.members:
+            return f"{team.name}\n{team.members}"
+        return team.name
+
+    def round_name_row_index(round_num: int) -> int:
+        # Header is row 1.
+        stride = 2 if excel_members_below else 1
+        return 2 + (round_num - 1) * stride
+
+    def members_vlookup_formula(*, key_cell_ref: str) -> str:
+        # Use VLOOKUP for broad Excel compatibility.
+        # Requires the workbook to contain the "ペア一覧" sheet with columns:
+        # A=ペア名, B=選手名.
+        return (
+            f"=IF({key_cell_ref}=\"\",\"\",IFERROR(VLOOKUP({key_cell_ref},'ペア一覧'!$A:$B,2,FALSE),\"\"))"
+        )
+
+    def apply_level_fill_and_alignment(*, row_idx: int, court: int, fill: PatternFill | None) -> None:
+        col_team1 = 3 + (court - 1) * 2 + 1
+        col_team2 = col_team1 + 1
+        if fill:
+            ws2.cell(row=row_idx, column=col_team1).fill = fill
+            ws2.cell(row=row_idx, column=col_team2).fill = fill
+        ws2.cell(row=row_idx, column=col_team1).alignment = Alignment(wrap_text=True, vertical="top")
+        ws2.cell(row=row_idx, column=col_team2).alignment = Alignment(wrap_text=True, vertical="top")
+
     for round_num in range(1, num_rounds + 1):
         # derive time from any match in round or compute from start
         round_start = None
@@ -3230,26 +3438,64 @@ def write_to_excel_like_summary(
         # compute end
         start_dt = datetime.strptime(round_start, "%H:%M")
         round_end = (start_dt + round_duration).strftime("%H:%M")
-        row = [round_num, round_start, round_end]
-        for court in range(1, max_court + 1):
-            match = next((m for m in matches if m.round_num == round_num and m.court == court), None)
-            if match:
-                row += [match.team1.name, match.team2.name]
-            else:
-                row += ["", ""]
-        ws2.append(row)
-        # Apply fills per court cells based on level (use team1 level)
-        for court in range(1, max_court + 1):
-            match = next((m for m in matches if m.round_num == round_num and m.court == court), None)
-            if match:
-                lvl = match.team1.level
-                fill = level_fill.get(lvl)
-                if fill:
-                    # Columns: 試合(1), 開始(2), 終了(3), courts start at col 4 -> each court has two columns
+        if not excel_members_below:
+            row = [round_num, round_start, round_end]
+            for court in range(1, max_court + 1):
+                match = next((m for m in matches if m.round_num == round_num and m.court == court), None)
+                if match:
+                    row += [render_excel_team_cell(match.team1), render_excel_team_cell(match.team2)]
+                else:
+                    row += ["", ""]
+            ws2.append(row)
+            row_idx_name = ws2.max_row
+
+            # Apply fills per court cells based on level (use team1 level)
+            for court in range(1, max_court + 1):
+                match = next((m for m in matches if m.round_num == round_num and m.court == court), None)
+                if not match:
+                    continue
+                fill = level_fill.get(match.team1.level)
+                apply_level_fill_and_alignment(row_idx=row_idx_name, court=court, fill=fill)
+        else:
+            # Two-row layout: row 1 = pair names, row 2 = member names.
+            row_names = [round_num, round_start, round_end]
+            for court in range(1, max_court + 1):
+                match = next((m for m in matches if m.round_num == round_num and m.court == court), None)
+                if match:
+                    row_names += [match.team1.name, match.team2.name]
+                else:
+                    row_names += ["", ""]
+            ws2.append(row_names)
+            row_idx_name = ws2.max_row
+
+            row_members: list[Any] = ["", "", ""]
+            for court in range(1, max_court + 1):
+                match = next((m for m in matches if m.round_num == round_num and m.court == court), None)
+                if not match:
+                    row_members += ["", ""]
+                    continue
+
+                if excel_include_members:
+                    row_members += [match.team1.members or "", match.team2.members or ""]
+                elif excel_members_vlookup:
                     col_team1 = 3 + (court - 1) * 2 + 1
                     col_team2 = col_team1 + 1
-                    ws2.cell(row=round_num+1, column=col_team1).fill = fill
-                    ws2.cell(row=round_num+1, column=col_team2).fill = fill
+                    key1 = f"{get_column_letter(col_team1)}{row_idx_name}"
+                    key2 = f"{get_column_letter(col_team2)}{row_idx_name}"
+                    row_members += [members_vlookup_formula(key_cell_ref=key1), members_vlookup_formula(key_cell_ref=key2)]
+                else:
+                    row_members += ["", ""]
+            ws2.append(row_members)
+            row_idx_members = ws2.max_row
+
+            # Apply fills/alignment on both rows.
+            for court in range(1, max_court + 1):
+                match = next((m for m in matches if m.round_num == round_num and m.court == court), None)
+                if not match:
+                    continue
+                fill = level_fill.get(match.team1.level)
+                apply_level_fill_and_alignment(row_idx=row_idx_name, court=court, fill=fill)
+                apply_level_fill_and_alignment(row_idx=row_idx_members, court=court, fill=fill)
 
     # Sheet 3: ペア一覧（試合数）
     ws3 = wb.create_sheet("ペア一覧")
@@ -3387,13 +3633,79 @@ def write_to_excel_like_summary(
     for ws in [ws1, ws2, ws3, ws4, ws4_team, ws4_round]:
         style_sheet(ws)
 
+    if excel_members_below:
+        thick = Side(style="thick", color="000000")
+        dotted = Side(style="dotted", color="000000")
+
+        # Keep header visible + lock the left time columns.
+        # Freeze top row and columns A-C.
+        ws2.freeze_panes = "D2"
+        for cell in ws2[1]:
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        # Give header a bit more height so "コートXX-チームY" is readable.
+        ws2.row_dimensions[1].height = 36
+
+        def apply_team_block_border(*, name_row: int, members_row: int, col: int, opponent_side: str) -> None:
+            """Border a (pair+members) block.
+
+            - Outer edges are thick.
+            - The opponent-facing edge is dotted (so 'vs' boundary is visually obvious).
+            """
+            if opponent_side not in ("left", "right"):
+                raise ValueError("opponent_side must be 'left' or 'right'")
+
+            top_cell = ws2.cell(row=name_row, column=col)
+            bot_cell = ws2.cell(row=members_row, column=col)
+
+            left_side = dotted if opponent_side == "left" else thick
+            right_side = dotted if opponent_side == "right" else thick
+
+            # Keep the inner border between name/members thin.
+            top_cell.border = Border(
+                left=left_side,
+                right=right_side,
+                top=thick,
+                bottom=top_cell.border.bottom,
+            )
+            bot_cell.border = Border(
+                left=left_side,
+                right=right_side,
+                top=bot_cell.border.top,
+                bottom=thick,
+            )
+
+        for round_num in range(1, num_rounds + 1):
+            name_row = round_name_row_index(round_num)
+            members_row = name_row + 1
+            for court in range(1, max_court + 1):
+                col_team1 = 3 + (court - 1) * 2 + 1
+                col_team2 = col_team1 + 1
+                # Dotted line between opponents (team1 right edge / team2 left edge)
+                apply_team_block_border(name_row=name_row, members_row=members_row, col=col_team1, opponent_side="right")
+                apply_team_block_border(name_row=name_row, members_row=members_row, col=col_team2, opponent_side="left")
+
     # 表示試合数 vs 実試合数サマリ (対戦表シートに追加)
+    def is_round_row(row_idx: int) -> bool:
+        v = ws2.cell(row=row_idx, column=1).value
+        if v is None:
+            return False
+        if isinstance(v, int):
+            return True
+        if isinstance(v, float) and v.is_integer():
+            return True
+        if isinstance(v, str):
+            s = v.strip()
+            return s.isdigit()
+        return False
+
     displayed = 0
-    for r in range(2, ws2.max_row+1):
+    for r in range(2, ws2.max_row + 1):
+        if not is_round_row(r):
+            continue
         # courts start column 4, step 2 (team1, team2)
         for col in range(4, 4 + max_court * 2, 2):
             t1 = ws2.cell(row=r, column=col).value
-            t2 = ws2.cell(row=r, column=col+1).value if col+1 <= ws2.max_column else None
+            t2 = ws2.cell(row=r, column=col + 1).value if col + 1 <= ws2.max_column else None
             if t1 and t2:
                 displayed += 1
     expected = len(matches)
@@ -3669,35 +3981,62 @@ def write_to_excel_like_summary(
             # compute end
             start_dt = datetime.strptime(round_start, "%H:%M")
             round_end = (start_dt + round_duration).strftime("%H:%M")
-            row = [round_num, round_start, round_end]
-            for court in range(1, max_court + 1):
-                match = next((m for m in matches if m.round_num == round_num and m.court == court), None)
-                if match:
-                    row += [match.team1.name, match.team2.name]
-                else:
-                    row += ["", ""]
-            ws2.cell(row=round_num+1, column=1).value = row[0]
-            ws2.cell(row=round_num+1, column=2).value = row[1]
-            ws2.cell(row=round_num+1, column=3).value = row[2]
+            row_name_idx = round_name_row_index(round_num)
+            row_members_idx = row_name_idx + 1
+
+            # Name row
+            ws2.cell(row=row_name_idx, column=1).value = round_num
+            ws2.cell(row=row_name_idx, column=2).value = round_start
+            ws2.cell(row=row_name_idx, column=3).value = round_end
+
+            # Members row (only for two-row layout)
+            if excel_members_below:
+                ws2.cell(row=row_members_idx, column=1).value = ""
+                ws2.cell(row=row_members_idx, column=2).value = ""
+                ws2.cell(row=row_members_idx, column=3).value = ""
+
             for court in range(1, max_court + 1):
                 col_team1 = 3 + (court - 1) * 2 + 1
                 col_team2 = col_team1 + 1
-                ws2.cell(row=round_num+1, column=col_team1).value = row[3 + (court-1)*2]
-                ws2.cell(row=round_num+1, column=col_team2).value = row[3 + (court-1)*2 + 1]
-                # 塗り直し
                 match = next((m for m in matches if m.round_num == round_num and m.court == court), None)
                 if match:
-                    lvl = match.team1.level
-                    fill = level_fill.get(lvl)
-                    if fill:
-                        ws2.cell(row=round_num+1, column=col_team1).fill = fill
-                        ws2.cell(row=round_num+1, column=col_team2).fill = fill
+                    ws2.cell(row=row_name_idx, column=col_team1).value = match.team1.name
+                    ws2.cell(row=row_name_idx, column=col_team2).value = match.team2.name
+                else:
+                    ws2.cell(row=row_name_idx, column=col_team1).value = ""
+                    ws2.cell(row=row_name_idx, column=col_team2).value = ""
+
+                if excel_members_below:
+                    if not match:
+                        ws2.cell(row=row_members_idx, column=col_team1).value = ""
+                        ws2.cell(row=row_members_idx, column=col_team2).value = ""
+                    else:
+                        if excel_include_members:
+                            ws2.cell(row=row_members_idx, column=col_team1).value = match.team1.members or ""
+                            ws2.cell(row=row_members_idx, column=col_team2).value = match.team2.members or ""
+                        elif excel_members_vlookup:
+                            key1 = f"{get_column_letter(col_team1)}{row_name_idx}"
+                            key2 = f"{get_column_letter(col_team2)}{row_name_idx}"
+                            ws2.cell(row=row_members_idx, column=col_team1).value = members_vlookup_formula(key_cell_ref=key1)
+                            ws2.cell(row=row_members_idx, column=col_team2).value = members_vlookup_formula(key_cell_ref=key2)
+                        else:
+                            ws2.cell(row=row_members_idx, column=col_team1).value = ""
+                            ws2.cell(row=row_members_idx, column=col_team2).value = ""
+
+                # 塗り直し
+                if match:
+                    fill = level_fill.get(match.team1.level)
+                    apply_level_fill_and_alignment(row_idx=row_name_idx, court=court, fill=fill)
+                    if excel_members_below:
+                        apply_level_fill_and_alignment(row_idx=row_members_idx, court=court, fill=fill)
         # サマリ再計算
         displayed = 0
-        for r in range(2, ws2.max_row+1):
+        for r in range(2, ws2.max_row + 1):
+            if not is_round_row(r):
+                continue
             for col in range(4, 4 + max_court * 2, 2):
                 t1 = ws2.cell(row=r, column=col).value
-                t2 = ws2.cell(row=r, column=col+1).value if col+1 <= ws2.max_column else None
+                t2 = ws2.cell(row=r, column=col + 1).value if col + 1 <= ws2.max_column else None
                 if t1 and t2:
                     displayed += 1
         collision_count = len(detect_collisions(matches))
@@ -3774,7 +4113,16 @@ def write_personal_schedule_html(
             match = next((m for m in matches if m.round_num == round_num and m.court == court), None)
             if match:
                 # iPhone等でヘッダー(コート番号)が見えなくなることがあるため、セル側にもコート番号を入れておく
-                row.append((f"C{court} {match.team1.name} vs {match.team2.name}", False))
+                if include_members and (match.team1.members or match.team2.members):
+                    t1m = escape(match.team1.members or "")
+                    t2m = escape(match.team2.members or "")
+                    row.append((
+                        f"C{court} {escape(match.team1.name)} vs {escape(match.team2.name)}"
+                        f"<br><small>{t1m} / {t2m}</small>",
+                        True,
+                    ))
+                else:
+                    row.append((f"C{court} {match.team1.name} vs {match.team2.name}", False))
                 clubs_in_round.add(match.team1.group)
                 clubs_in_round.add(match.team2.group)
                 teams_in_round.add(match.team1.name)
@@ -3889,8 +4237,80 @@ def write_personal_schedule_html(
     club_options = sorted({t.group for t in teams if t.group}, key=lambda g: g.casefold())
     club_root_options = sorted({root for root in (club_root(t.group) for t in teams if t.group) if root}, key=lambda g: g.casefold())
 
+    # For client-side highlighting when filtering by club/area.
+    club_to_teams: dict[str, list[str]] = {}
+    root_to_teams: dict[str, list[str]] = {}
+    for t in teams:
+        if not t.name:
+            continue
+        if t.group:
+            club_to_teams.setdefault(t.group, []).append(t.name)
+            root = club_root(t.group)
+            if root:
+                root_to_teams.setdefault(root, []).append(t.name)
+
     def escape_attr(value: str) -> str:
         return escape(value, quote=True)
+
+    # Pair count summary (club-root x level)
+    summary_counts: dict[str, dict[str, int]] = {}
+    for t in teams:
+        root = club_root(t.group) or ""
+        lvl = (t.level or "").strip().upper()
+        bucket = summary_counts.setdefault(root, {"A": 0, "B": 0, "C": 0, "?": 0, "total": 0})
+        if lvl in ("A", "B", "C"):
+            bucket[lvl] += 1
+        else:
+            bucket["?"] += 1
+        bucket["total"] += 1
+
+    show_unknown = any(v.get("?", 0) > 0 for v in summary_counts.values())
+    summary_headers = ["エリア", "A", "B", "C"] + (["不明"] if show_unknown else []) + ["合計"]
+    summary_rows: list[list[str]] = []
+    grand = {"A": 0, "B": 0, "C": 0, "?": 0, "total": 0}
+    for root in sorted(summary_counts.keys(), key=lambda s: (s or "").casefold()):
+        label = root or "(未分類)"
+        c = summary_counts[root]
+        grand["A"] += int(c.get("A", 0) or 0)
+        grand["B"] += int(c.get("B", 0) or 0)
+        grand["C"] += int(c.get("C", 0) or 0)
+        grand["?"] += int(c.get("?", 0) or 0)
+        grand["total"] += int(c.get("total", 0) or 0)
+        row = [label, str(c.get("A", 0)), str(c.get("B", 0)), str(c.get("C", 0))]
+        if show_unknown:
+            row.append(str(c.get("?", 0)))
+        row.append(str(c.get("total", 0)))
+        summary_rows.append(row)
+
+    # Grand total row
+    total_row = ["合計", str(grand["A"]), str(grand["B"]), str(grand["C"])]
+    if show_unknown:
+        total_row.append(str(grand["?"]))
+    total_row.append(str(grand["total"]))
+    summary_rows.append(total_row)
+
+    def render_summary_table(fh) -> None:
+        fh.write("<section class='table-block' id='pair-summary-section'>")
+        fh.write("<h2>ペア数サマリー</h2>")
+        fh.write("<div class='wrap wrap-pair-summary'><table id='pair-summary'><thead><tr>")
+        for idx, h in enumerate(summary_headers):
+            cls = " class='summary-total-col'" if idx == (len(summary_headers) - 1) else ""
+            fh.write(f"<th{cls}>{escape(h)}</th>")
+        fh.write("</tr></thead><tbody>")
+        for row in summary_rows:
+            is_total = bool(row) and row[0] == "合計"
+            tr_cls = " class='summary-total-row'" if is_total else ""
+            fh.write(f"<tr{tr_cls}>")
+            for idx, value in enumerate(row):
+                td_classes: list[str] = []
+                if idx == (len(row) - 1):
+                    td_classes.append("summary-total-col")
+                if is_total:
+                    td_classes.append("summary-total")
+                td_cls = f" class='{' '.join(td_classes)}'" if td_classes else ""
+                fh.write(f"<td{td_cls}>{escape(value)}</td>")
+            fh.write("</tr>")
+        fh.write("</tbody></table></div></section>")
 
     def render_table(
         fh,
@@ -3939,7 +4359,7 @@ def write_personal_schedule_html(
             for option in keyword_options:
                 fh.write(f"<option value='{escape(option)}'></option>")
             fh.write("</datalist>")
-        fh.write("<div class='wrap'><table id='" + escape(section_id) + "'><thead><tr>")
+        fh.write("<div class='wrap wrap-" + escape(section_id) + "'><table id='" + escape(section_id) + "'><thead><tr>")
         for idx, header in enumerate(headers):
             classes: list[str] = []
             if idx in sticky_map:
@@ -4007,9 +4427,11 @@ def write_personal_schedule_html(
 :root {
     --match-col-width: 95px;
     --short-round-width: 90px;
-    --short-court-width: 64px;
+    --short-court-width: 52px;
+    --short-member-width: 160px;
     --personal-team-width: 180px;
     --personal-member-width: 220px;
+    --personal-round-width: 120px;
 }
 body {font-family: system-ui, sans-serif; margin: 16px; color: #111;}
 h1 {margin-bottom: 8px;}
@@ -4024,16 +4446,22 @@ tbody tr:nth-child(odd) td.sticky-col {background: #fdfdfd;}
 tbody tr:nth-child(even) td.sticky-col {background: #fff;}
 small {color: #666;}
 .team-meta {font-weight: 600;}
-.wrap {overflow-x: auto; -webkit-overflow-scrolling: touch; max-width: 100%; box-shadow: inset 0 0 0 1px #f0f0f0; border-radius: 4px;}
+.wrap {overflow-x: auto; -webkit-overflow-scrolling: touch; max-width: 100%; box-shadow: inset 0 0 0 1px #f0f0f0; border-radius: 4px; position: relative; isolation: isolate;}
+.wrap-personal-schedule {overflow: auto; max-height: 72vh;}
 .wrap table {width: max-content;}
 .filter-bar {display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 8px;}
 .filter-bar label {display: flex; align-items: center; gap: 4px; font-size: 13px;}
 input[type='search'] {padding: 4px 6px; font-size: 13px; border: 1px solid #bbb; border-radius: 4px;}
+
+/* Pair summary: highlight totals */
+#pair-summary td.summary-total-col, #pair-summary th.summary-total-col {font-weight: 700; background: #f7f7f7;}
+#pair-summary tr.summary-total-row td {font-weight: 700; background: #f7f7f7;}
 select {padding: 4px; font-size: 13px; border: 1px solid #bbb; border-radius: 4px;}
 section.table-block {margin-bottom: 40px;}
 datalist option {font-size: 12px;}
 tr.matched td {background: #fff8d5;}
-mark {background: #ffe066; padding: 0 2px; border-radius: 2px;}
+td.cell-hit {background: #ffe08a !important; box-shadow: inset 0 0 0 2px rgba(0,0,0,0.18);}
+mark {background: #ffe08a; padding: 0 2px; border-radius: 2px;}
 #lock-overlay.lock-overlay {position: fixed; inset: 0; background: rgba(0,0,0,0.55); display: flex; align-items: center; justify-content: center; z-index: 9999; padding: 16px;}
 .lock-card {background: #fff; color: #111; border-radius: 10px; padding: 16px; max-width: 460px; width: 100%; box-shadow: 0 10px 30px rgba(0,0,0,0.3);}
 .lock-title {font-weight: 700; font-size: 16px; margin-bottom: 8px;}
@@ -4053,7 +4481,8 @@ body.locked > :not(#lock-overlay) {filter: blur(2px); pointer-events: none; user
 .sticky-col {position: -webkit-sticky; position: sticky; box-shadow: inset -1px 0 0 rgba(0,0,0,0.08);}
 td.sticky-col {background: #fff;}
 #short-team, #short-round {table-layout: fixed;}
-#match-matrix, #personal-schedule {table-layout: auto;}
+#match-matrix {table-layout: auto;}
+#personal-schedule {table-layout: fixed;}
 #match-matrix td:not(.sticky-col), #short-team td:not(.sticky-col), #short-round td:not(.sticky-col), #personal-schedule td:not(.sticky-col) {white-space: normal; word-break: break-word; overflow-wrap: break-word;}
 #match-matrix .match-col, #short-team .round-col, #short-round .round-col, #short-team .court-col, #short-round .court-col {white-space: nowrap;}
 #match-matrix .match-col {left: 0; min-width: var(--match-col-width); max-width: var(--match-col-width);}
@@ -4062,13 +4491,26 @@ td.sticky-col {background: #fff;}
 #personal-schedule .team-col {left: 0; width: var(--personal-team-width); min-width: var(--personal-team-width); max-width: var(--personal-team-width);}
 #personal-schedule .member-col {left: var(--personal-team-width); width: var(--personal-member-width); min-width: var(--personal-member-width); max-width: var(--personal-member-width);}
 #personal-schedule .team-col, #personal-schedule .member-col {white-space: normal; word-break: break-word; overflow-wrap: anywhere; line-height: 1.15;}
+#personal-schedule th:not(.sticky-col), #personal-schedule td:not(.sticky-col) {min-width: var(--personal-round-width); max-width: var(--personal-round-width);}
+#match-matrix td small {display: block; color: #333; line-height: 1.1;}
+
+/*
+ iOS Safari: position: sticky inside overflow scrolling can become unstable during pinch-zoom
+ when -webkit-overflow-scrolling: touch is enabled. Prefer stability over momentum.
+*/
+@supports (-webkit-touch-callout: none) {
+    .wrap { -webkit-overflow-scrolling: auto; }
+}
+
 @media (max-width: 768px) {
     :root {
         --match-col-width: 84px;
-        --short-round-width: 80px;
-        --short-court-width: 56px;
-        --personal-team-width: 56px;
-        --personal-member-width: 120px;
+        --short-round-width: 52px;
+        --short-court-width: 28px;
+        --short-member-width: 72px;
+        --personal-team-width: 52px;
+        --personal-member-width: 84px;
+        --personal-round-width: 44px;
     }
     body {margin: 12px;}
     table {font-size: 11px; min-width: 420px;}
@@ -4081,9 +4523,68 @@ td.sticky-col {background: #fff;}
         line-height: 1.1;
     }
 
-    /* iPhone: avoid 1-char wrapping by giving each round/court column a minimum width and scrolling horizontally */
-    #personal-schedule th:not(.sticky-col), #personal-schedule td:not(.sticky-col) {min-width: 92px;}
-    #match-matrix th:not(.sticky-col), #match-matrix td:not(.sticky-col) {min-width: 110px;}
+    /* iPhone: keep columns compact but readable; horizontal scrolling remains available */
+    #match-matrix th:not(.sticky-col), #match-matrix td:not(.sticky-col) {min-width: 80px;}
+
+    /* Short list: let labels wrap so we can shrink columns more */
+    #short-team .round-col, #short-round .round-col {white-space: normal;}
+    #short-team .court-col, #short-round .court-col {white-space: normal;}
+    #short-team th.round-col, #short-round th.round-col,
+    #short-team th.court-col, #short-round th.court-col {line-height: 1.05; padding: 2px 3px;}
+    #short-team td.round-col, #short-round td.round-col,
+    #short-team td.court-col, #short-round td.court-col {line-height: 1.05; padding: 2px 3px;}
+
+    /* Short list: member-name columns should NOT decide the table width */
+    #short-team th:nth-child(5), #short-team td:nth-child(5),
+    #short-team th:nth-child(7), #short-team td:nth-child(7),
+    #short-round th:nth-child(5), #short-round td:nth-child(5),
+    #short-round th:nth-child(7), #short-round td:nth-child(7) {
+        width: var(--short-member-width);
+        min-width: var(--short-member-width);
+        max-width: var(--short-member-width);
+        white-space: normal;
+        word-break: break-word;
+        overflow-wrap: anywhere;
+        line-height: 1.05;
+        padding: 2px 3px;
+    }
+
+    /* Pair summary: keep the 'エリア' column compact on iPhone */
+    .wrap-pair-summary table { width: 100%; min-width: 0; }
+    #pair-summary { width: 100%; min-width: 0; }
+    #pair-summary th, #pair-summary td { padding: 2px 3px; }
+    #pair-summary th:first-child, #pair-summary td:first-child {
+        width: 4.2em;
+        min-width: 4.2em;
+        max-width: 4.2em;
+        white-space: normal;
+        word-break: break-word;
+        overflow-wrap: anywhere;
+        line-height: 1.05;
+    }
+}
+
+@media print {
+    @page { size: A4; margin: 8mm; }
+    body { margin: 0; }
+    h1 { margin: 0 0 6mm; }
+    .filter-bar, datalist, #lock-overlay { display: none !important; }
+
+    /* Print only the compact (short) lists */
+    #match-matrix-section, #personal-schedule-section { display: none !important; }
+
+    /* Remove scroll containers / sticky behavior */
+    .wrap { overflow: visible !important; max-height: none !important; box-shadow: none !important; }
+    .wrap table { width: 100% !important; }
+    table { min-width: 0 !important; }
+    th, td { font-size: 9pt; padding: 2mm 2mm; }
+    th { position: static !important; }
+    .sticky-col { position: static !important; box-shadow: none !important; }
+    th.sticky-col, td.sticky-col { z-index: auto !important; }
+
+    /* Improve page breaks */
+    section.table-block { break-inside: avoid; page-break-inside: avoid; }
+    tr { break-inside: avoid; page-break-inside: avoid; }
 }
 </style>
         """
@@ -4110,6 +4611,8 @@ td.sticky-col {background: #fff;}
 </div>
                 """
             )
+
+        render_summary_table(fh)
         render_table(
             fh,
             "match-matrix",
@@ -4173,6 +4676,8 @@ td.sticky-col {background: #fff;}
         fh.write(
             r"""<script>
 const HTML_PASS_HASH=""" + repr(pass_hash) + r""";
+const CLUB_TEAMS=""" + json.dumps(club_to_teams, ensure_ascii=False) + r""";
+const ROOT_TEAMS=""" + json.dumps(root_to_teams, ensure_ascii=False) + r""";
 async function sha256Hex(text){
     const data=new TextEncoder().encode(text);
     const digest=await crypto.subtle.digest('SHA-256',data);
@@ -4228,6 +4733,7 @@ document.querySelectorAll('.filter-bar').forEach(bar=>{
 
     const resetRow=row=>{
         row.classList.remove('matched');
+        row.querySelectorAll('td').forEach(cell=>cell.classList.remove('cell-hit'));
         row.querySelectorAll('td').forEach(cell=>{
             if(cell.dataset.rawHtml!==undefined){
                 cell.innerHTML=cell.dataset.rawHtml;
@@ -4236,6 +4742,47 @@ document.querySelectorAll('.filter-bar').forEach(bar=>{
             }
         });
     };
+
+    const isNameChar=(ch)=>{
+        if(!ch){return false;}
+        // Only letters/numbers count as "name characters" for boundary checks.
+        // This keeps B1 from matching B11 (digit boundary) while allowing matches
+        // next to separators like '/', '-', '_' that may appear in the table text.
+        return /[\p{L}\p{N}]/u.test(ch);
+    };
+    const containsExactName=(text,name)=>{
+        if(!text||!name){return false;}
+        let start=0;
+        while(true){
+            const idx=text.indexOf(name,start);
+            if(idx===-1){return false;}
+            const before=idx>0?text[idx-1]:'';
+            const after=(idx+name.length)<text.length?text[idx+name.length]:'';
+            if(!isNameChar(before)&&!isNameChar(after)){
+                return true;
+            }
+            start=idx+1;
+        }
+    };
+    const applyCellHits=(row,names)=>{
+        if(!names||!names.length){return false;}
+        let hit=false;
+        const cells=Array.from(row.querySelectorAll('td'));
+        cells.forEach(cell=>{
+            // Use innerText so <br> becomes a separator; textContent would
+            // concatenate pair name and member names, breaking boundary checks.
+            const text=(cell.innerText||cell.textContent||'');
+            for(const name of names){
+                if(name && containsExactName(text,name)){
+                    cell.classList.add('cell-hit');
+                    hit=true;
+                    break;
+                }
+            }
+        });
+        return hit;
+    };
+
 
     const highlightRowText=(row,term,colValue)=>{
         if(!term){
@@ -4303,6 +4850,19 @@ document.querySelectorAll('.filter-bar').forEach(bar=>{
             if(visible&&rawTerm){
                 highlighted=highlightRowText(row,rawTerm,col);
             }
+            // When filtering by pair/club/area, highlight the relevant *cells* so it's
+            // easy to spot where the match is in wide tables.
+            if(visible&&!rawTerm){
+                let names=[];
+                if(teamVal!=='all'){
+                    names=[teamVal];
+                }else if(clubVal!=='all'){
+                    names=CLUB_TEAMS[clubVal]||[];
+                }else if(areaVal!=='all'){
+                    names=ROOT_TEAMS[areaVal]||[];
+                }
+                highlighted=applyCellHits(row,names)||highlighted;
+            }
             if(!rawTerm&&narrowedBySelect&&visible){
                 row.classList.add('matched');
             }else if(highlighted){
@@ -4329,9 +4889,649 @@ document.querySelectorAll('.filter-bar').forEach(bar=>{
         )
         fh.write("</body></html>")
 
+def write_score_sheets_html(
+    matches: List[Match],
+    teams: List[Team],
+    output_path: str,
+    *,
+    per_page: int = 10,
+    columns: int = 2,
+    include_members: bool = True,
+    round_minutes: int = DEFAULT_ROUND_MINUTES,
+    title: str = "得点記入表",
+) -> None:
+    """Write printable score sheets (one per match) as a static HTML.
+
+    Layout is intentionally close to the provided template image.
+    """
+
+    if per_page <= 0:
+        raise ValueError("per_page must be positive")
+    if columns <= 0:
+        raise ValueError("columns must be positive")
+    if round_minutes <= 0:
+        raise ValueError("round_minutes must be positive")
+
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    team_lookup = {t.name: t for t in teams}
+    # Sort by court first so cut sheets can be grouped per court easily.
+    ms = sorted(matches, key=lambda m: (m.court, m.round_num))
+
+    def members_for(name: str, fallback: str) -> str:
+        if not include_members:
+            return ""
+        t = team_lookup.get(name)
+        return (t.members if (t and t.members) else fallback) or ""
+
+    def fmt_time(dt: datetime) -> str:
+        return dt.strftime("%H:%M")
+
+    def fmt_end(dt: datetime) -> str:
+        return (dt + timedelta(minutes=int(round_minutes))).strftime("%H:%M")
+
+    def esc(s: str) -> str:
+        return escape(s) if s else ""
+
+    def card_html(m: Match) -> str:
+        t1 = m.team1.name
+        t2 = m.team2.name
+        m1 = members_for(t1, m.team1.members)
+        m2 = members_for(t2, m.team2.members)
+        start = fmt_time(m.start_time)
+        end = fmt_end(m.start_time)
+        match_label = f"第{m.round_num}試合"
+
+        parts: list[str] = [
+            "<div class='card'>",
+            "<table class='sheet'>",
+            "<tr>",
+            f"<th class='meta meta-top match'>{match_label}</th>",
+            f"<th class='court-head' colspan='2'>コート <span class='court-no'>{m.court}</span></th>",
+            "</tr>",
+            "<tr>",
+            f"<th class='meta'>時間</th>",
+            f"<td class='pair'>{esc(t1)}</td>",
+            f"<td class='pair'>{esc(t2)}</td>",
+            "</tr>",
+            "<tr>",
+            f"<td class='time'>{start}-{end}</td>",
+            f"<td class='members'>{esc(m1) if include_members else ''}</td>",
+            f"<td class='members'>{esc(m2) if include_members else ''}</td>",
+            "</tr>",
+        ]
+
+        parts.extend(
+            [
+                "<tr class='score-row'>",
+                "<th class='meta'>得点</th>",
+                "<td class='blank blank-score'></td>",
+                "<td class='blank blank-score'></td>",
+                "</tr>",
+                "<tr class='sign-row'>",
+                "<th class='meta'>サイン(審判/勝者)</th>",
+                "<td class='blank blank-sign'></td>",
+                "<td class='blank blank-sign'></td>",
+                "</tr>",
+                "</table>",
+                "</div>",
+            ]
+        )
+        return "".join(parts)
+
+    pages: list[list[Match]] = [ms[i : i + per_page] for i in range(0, len(ms), per_page)]
+    rows = int(math.ceil(per_page / columns))
+
+    with path.open("w", encoding="utf-8") as fh:
+        fh.write("<!DOCTYPE html><html lang='ja'><head><meta charset='utf-8'>")
+        fh.write("<meta name='viewport' content='width=device-width, initial-scale=1'>")
+        fh.write(f"<title>{escape(title)}</title>")
+        fh.write(
+            """
+<style>
+body {font-family: system-ui, sans-serif; margin: 12px; color: #111;}
+h1 {margin: 0 0 10px; font-size: 18px;}
+.note {margin: 0 0 12px; font-size: 12px; color: #333;}
+
+.page {page-break-after: always;}
+.grid {display: grid; grid-template-columns: repeat(var(--cols), 1fr); grid-template-rows: repeat(var(--rows), 1fr); gap: 5mm; align-items: stretch;}
+
+.card {border: 2px solid #111; border-radius: 4px; padding: 0; break-inside: avoid; height: 100%; display: flex;}
+
+table.sheet {border-collapse: collapse; width: 100%; table-layout: fixed; height: 100%; flex: 1;}
+table.sheet th, table.sheet td {border: 2px solid #111; padding: 2.8mm 2.3mm; vertical-align: middle;}
+
+th.meta {width: 28%; font-size: 16px; font-weight: 900; text-align: left;}
+th.meta-top {vertical-align: top;}
+
+th.court-head {text-align: center; font-weight: 900; font-size: 18px; padding: 2.2mm;}
+.court-no {font-size: 30px; font-weight: 900; margin-left: 2mm;}
+
+th.match {font-size: 20px; font-weight: 900; text-align: center;}
+td.time {font-size: 20px; font-weight: 900; text-align: center;}
+td.pair {font-size: 22px; font-weight: 900; text-align: center; line-height: 1.1;}
+td.members {font-size: 18px; font-weight: 700; text-align: center; word-break: break-word; overflow-wrap: anywhere;}
+
+td.blank {background: #fff;}
+td.blank-score {min-height: 18mm; height: auto;}
+td.blank-sign {min-height: 15mm; height: auto;}
+
+@media print {
+    @page { size: A4; margin: 7mm; }
+  body {margin: 0;}
+  .page-title {display: none;}
+  .note {display: none;}
+    /* Make 8-up/10-up actually consume the full printable height */
+    .page {height: calc(297mm - 14mm); --gap: 4mm;}
+    .grid {height: 100%; gap: var(--gap);}
+    .card {height: calc((100% - ((var(--rows) - 1) * var(--gap))) / var(--rows));}
+
+    /* Scale blank boxes with card height so bottom whitespace turns into writable area */
+    .score-row td.blank-score {height: calc(((100% - 0mm) * 0.28));}
+    .sign-row td.blank-sign {height: calc(((100% - 0mm) * 0.22));}
+}
+</style>
+            """
+        )
+        fh.write(f"</head><body class='pp-{int(per_page)} cols-{int(columns)}'>")
+        fh.write(f"<h1 class='page-title'>{escape(title)}</h1>")
+        fh.write(
+            "<p class='note'><strong>印刷の倍率（Scale）を確認/調整してください（例: 100%）。</strong><br>各試合1枚。印刷してカットして使えます。</p>"
+        )
+
+        for page in pages:
+            fh.write(f"<div class='page' style='--cols:{int(columns)}; --rows:{int(rows)}'>")
+            fh.write("<div class='grid'>")
+            for m in page:
+                fh.write(card_html(m))
+            fh.write("</div></div>")
+
+        fh.write("</body></html>")
+
+
+def write_wall_schedule_html(
+    matches: List[Match],
+    output_path: str,
+    num_rounds: int,
+    courts: int,
+    *,
+    start_time_hhmm: str = DEFAULT_START_TIME_HHMM,
+    round_minutes: int = DEFAULT_ROUND_MINUTES,
+    courts_per_page: int = 1,
+    team_color_rules: list[tuple[str, str]] | None = None,
+    auto_team_colors: bool = True,
+    cell_background: bool = True,
+) -> None:
+    """Generate a print-friendly (wall-posting) HTML.
+
+    - 1ページあたり1〜3コート（画面表示の面付け）
+    - 印刷も『1ページあたり1〜3コート』（courts_per_pageに従う）
+    - No JavaScript required
+    """
+
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    mc_lookup: dict[tuple[int, int], Match] = {(m.round_num, m.court): m for m in matches}
+
+    def round_start_hhmm(round_num: int) -> str:
+        any_match = next((m for m in matches if m.round_num == round_num), None)
+        if any_match:
+            return any_match.start_time.strftime("%H:%M")
+        base = _base_datetime_from_hhmm(start_time_hhmm)
+        return (base + timedelta(minutes=int(round_minutes) * (round_num - 1))).strftime("%H:%M")
+
+    rules: list[tuple[str, str]] = list(team_color_rules or [])
+
+    def _hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
+        s = hex_color.strip()
+        if s.startswith("#"):
+            s = s[1:]
+        if len(s) != 6:
+            raise ValueError(f"bad hex color: {hex_color}")
+        return int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16)
+
+    def _rgb_to_hex(rgb: tuple[int, int, int]) -> str:
+        r, g, b = rgb
+        r = max(0, min(255, int(r)))
+        g = max(0, min(255, int(g)))
+        b = max(0, min(255, int(b)))
+        return f"#{r:02x}{g:02x}{b:02x}"
+
+    def _blend(a: tuple[int, int, int], b: tuple[int, int, int], t: float) -> tuple[int, int, int]:
+        # t=0 -> a, t=1 -> b
+        return (
+            int(round(a[0] + (b[0] - a[0]) * t)),
+            int(round(a[1] + (b[1] - a[1]) * t)),
+            int(round(a[2] + (b[2] - a[2]) * t)),
+        )
+
+    def _hsl_to_hex(h: float, s: float, l: float) -> str:
+        import colorsys
+
+        # colorsys uses HLS
+        r, g, b = colorsys.hls_to_rgb((h % 360.0) / 360.0, l / 100.0, s / 100.0)
+        return _rgb_to_hex((int(round(r * 255)), int(round(g * 255)), int(round(b * 255))))
+
+    import re
+
+    def _team_group_key(team_name: str) -> str:
+        """Group teams by prefix so 上海A1/上海A2 share the same color.
+
+        Rule (simple + robust for JP/CJK names):
+        - Take all leading characters up to the first ASCII letter/digit.
+        - If that becomes empty, fall back to the substring before first digit.
+        - If still empty, use the full name.
+        """
+
+        s = (team_name or "").strip()
+        if not s:
+            return ""
+        m = re.match(r"^([^0-9A-Za-z]+)", s)
+        if m:
+            key = m.group(1).strip()
+            if key:
+                return key
+        m2 = re.match(r"^(.+?)(?=\d)", s)
+        if m2:
+            key = m2.group(1).strip()
+            if key:
+                return key
+        return s
+
+    # Build stable color assignment per team *group*.
+    # - Manual rules override (keyword match)
+    # - Otherwise, auto assigns distinct hues in stable group order.
+    team_names: list[str] = sorted(
+        {
+            t
+            for m in matches
+            for t in (
+                (m.team1.name if m.team1 else ""),
+                (m.team2.name if m.team2 else ""),
+            )
+            if t
+        }
+    )
+    group_by_name: dict[str, str] = {name: _team_group_key(name) for name in team_names}
+    groups: list[str] = sorted({g for g in group_by_name.values() if g})
+
+    # Stable shape assignment per group (in addition to color).
+    # Even if colors look similar, shape makes it immediately distinguishable.
+    group_index: dict[str, int] = {g: i for i, g in enumerate(groups)}
+    shapes = ["circle", "square", "triangle", "diamond", "hex", "star"]
+
+    base_by_group: dict[str, str] = {}
+    bg_by_group: dict[str, str] = {}
+    white = (255, 255, 255)
+
+    # --- Color palette helpers (wall-friendly, high-contrast) ---
+    # For "遠くから見てパッと違う" を優先して、まずは鮮やかな定番の distinct palette を使う。
+    # グループ数が多い場合は HSL(ゴールデンアングル)で追加生成する。
+    _VIVID_BASE_COLORS: list[str] = [
+        "#e6194B",  # red
+        "#3cb44b",  # green
+        "#4363d8",  # blue
+        "#f58231",  # orange
+        "#911eb4",  # purple
+        "#42d4f4",  # cyan
+        "#ffe119",  # yellow
+        "#f032e6",  # magenta
+        "#bfef45",  # lime
+        "#469990",  # teal
+        "#9A6324",  # brown
+        "#800000",  # maroon
+        "#000075",  # navy
+        "#aaffc3",  # mint
+        "#ffd8b1",  # apricot
+        "#dcbeff",  # lavender
+        "#808000",  # olive
+        "#fabed4",  # pink
+        "#fffac8",  # beige
+        "#a9a9a9",  # gray
+    ]
+
+    def _pick_distinct_group_colors(n: int) -> list[tuple[str, str]]:
+        if n <= 0:
+            return []
+
+        out: list[tuple[str, str]] = []
+        for i in range(n):
+            if i < len(_VIVID_BASE_COLORS):
+                base_hex = _VIVID_BASE_COLORS[i]
+            else:
+                # Fallback: vivid HSL using golden-angle spacing (deterministic).
+                h = (i * 137.508) % 360.0
+                base_hex = _hsl_to_hex(h, s=92.0, l=42.0)
+
+            # Background: not too pale so it still reads at a distance.
+            bg_hex = _rgb_to_hex(_blend(_hex_to_rgb(base_hex), white, 0.55))
+            out.append((base_hex, bg_hex))
+
+        return out
+
+    # Apply manual rules (first match wins by rule order) to groups.
+    for g in groups:
+        for keyword, base_hex in rules:
+            if keyword and (keyword in g):
+                base_by_group[g] = base_hex
+                bg_by_group[g] = _rgb_to_hex(_blend(_hex_to_rgb(base_hex), white, 0.55))
+                break
+
+    # Also allow keyword match against full team names (if user targets e.g. "蛇口")
+    for name in team_names:
+        g = group_by_name.get(name, "")
+        if not g or g in base_by_group:
+            continue
+        for keyword, base_hex in rules:
+            if keyword and (keyword in name):
+                base_by_group[g] = base_hex
+                bg_by_group[g] = _rgb_to_hex(_blend(_hex_to_rgb(base_hex), white, 0.55))
+                break
+
+    # Auto colors (unique-ish per team)
+    if auto_team_colors:
+        need = sum(1 for g in groups if g not in base_by_group)
+        palette = _pick_distinct_group_colors(need)
+        pi = 0
+        for g in groups:
+            if g in base_by_group:
+                continue
+            base_hex, bg_hex = palette[pi]
+            pi += 1
+            base_by_group[g] = base_hex
+            bg_by_group[g] = bg_hex
+
+    def _chip_svg(base_hex: str, shape: str) -> str:
+        # Inline SVG prints reliably (even when background graphics is OFF).
+        # Keep a black stroke so it stays visible in B/W printing.
+        fill = escape(base_hex)
+        if shape == "circle":
+            body = "<circle cx='7' cy='7' r='5.4' />"
+        elif shape == "square":
+            body = "<rect x='2' y='2' width='10' height='10' rx='1.6' ry='1.6' />"
+        elif shape == "triangle":
+            body = "<polygon points='7,1.8 12.4,11.8 1.6,11.8' />"
+        elif shape == "diamond":
+            body = "<polygon points='7,1.6 12.4,7 7,12.4 1.6,7' />"
+        elif shape == "hex":
+            body = "<polygon points='7,1.4 12.2,4.3 12.2,9.7 7,12.6 1.8,9.7 1.8,4.3' />"
+        else:  # star
+            body = "<polygon points='7,1.2 8.7,5.3 13.1,5.6 9.7,8.4 10.8,12.7 7,10.4 3.2,12.7 4.3,8.4 0.9,5.6 5.3,5.3' />"
+        return (
+            "<svg class='chip' width='14' height='14' viewBox='0 0 14 14' aria-hidden='true' focusable='false'>"
+            f"<g fill='{fill}' stroke='#111' stroke-width='1.2'>{body}</g>"
+            "</svg>"
+        )
+
+    def render_team_cell(team: Team | None) -> str:
+        if not team:
+            return ""
+        name = team.name or ""
+        g = _team_group_key(name)
+        base_hex = base_by_group.get(g, "#777777")
+        shape = shapes[group_index.get(g, 0) % len(shapes)]
+        chip = _chip_svg(base_hex, shape)
+
+        if team.members:
+            text = f"{escape(name)}<br><small>{escape(team.members)}</small>"
+        else:
+            text = escape(name)
+        return f"<div class='team-cell'>{chip}<div class='team-text'>{text}</div></div>"
+
+    cpp = int(courts_per_page)
+    if cpp <= 0:
+        cpp = 1
+    if cpp > 3:
+        cpp = 3
+
+    with path.open("w", encoding="utf-8") as fh:
+        fh.write("<!DOCTYPE html><html lang='ja'><head><meta charset='utf-8'>")
+        fh.write("<meta name='viewport' content='width=device-width, initial-scale=1'>")
+        fh.write("<title>壁貼り用（コート別）</title>")
+        fh.write(
+            """
+<style>
+body {font-family: system-ui, sans-serif; margin: 12px; color: #111;}
+h1 {margin: 0 0 10px; font-size: 18px;}
+h2 {margin: 18px 0 8px; font-size: 16px;}
+.note {font-size: 12px; color: #444; margin: 0 0 14px;}
+.page {margin-bottom: 18px;}
+.grid {display: grid; gap: 10px; align-items: start;}
+.cols-1 {grid-template-columns: 1fr;}
+.cols-2 {grid-template-columns: 1fr 1fr;}
+.cols-3 {grid-template-columns: 1fr 1fr 1fr;}
+
+/* Scrolling wrapper so sticky columns work reliably */
+.court-wrap {overflow: auto; -webkit-overflow-scrolling: touch; max-width: 100%;}
+table {border-collapse: collapse; width: 100%; min-width: 520px; table-layout: fixed;}
+th, td {border: 1px solid #bbb; padding: 6px 8px; vertical-align: top;}
+th {background: #f2f2f2; text-align: left;}
+td.round, td.time {white-space: nowrap;}
+td.team {font-weight: 600;}
+td.team small {font-weight: 400; color: #333;}
+tr:nth-child(even) td {background: #fafafa;}
+
+/* Team cell layout + chip */
+.team-cell {display: flex; gap: 6px; align-items: flex-start;}
+.team-text {min-width: 0;}
+.chip {flex: 0 0 auto; margin-top: 1px;}
+
+/* Column sizing + sticky left columns (screen) */
+:root { --wall-col-round: 84px; --wall-col-time: 62px; --wall-col-score: 54px; }
+th.round-col {min-width: var(--wall-col-round); width: var(--wall-col-round);}
+th.time-col {min-width: var(--wall-col-time); width: var(--wall-col-time);}
+th.score-col {min-width: var(--wall-col-score); width: var(--wall-col-score); text-align: center;}
+
+th.round-col, td.round {position: sticky; left: 0; z-index: 2; background: #f2f2f2;}
+th.time-col, td.time {position: sticky; left: var(--wall-col-round); z-index: 2; background: #f2f2f2;}
+td.round, td.time {background: #fff;}
+tr:nth-child(even) td.round, tr:nth-child(even) td.time {background: #fafafa;}
+
+/* Score entry cells */
+td.score {text-align: center; font-weight: 700;}
+/* (no underline; just use the cell box) */
+
+/* Thicker borders to clearly separate courts */
+th.group-start, td.group-start {border-left: 3px solid #111;}
+th.group-end, td.group-end {border-right: 3px solid #111;}
+thead tr:first-child th.court-head {border-top: 3px solid #111;}
+tr.last-round td.group-start, tr.last-round td.group-mid, tr.last-round td.group-end {border-bottom: 3px solid #111;}
+
+td.group-mid { /* marker class for last-row bottom border */ }
+
+th.court-head {text-align: center; background: #e9e9e9;}
+
+@media print {
+    /* 縦で1枚に収めやすくする */
+    @page { size: A4; margin: 7mm; }
+    body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  h1, .note { display: none; }
+    /* Print one '.page' block at a time (1〜3コート/枚) */
+    .page { margin: 0; break-after: page; page-break-after: always; }
+    .page:last-of-type { break-after: auto; page-break-after: auto; }
+    .grid { display: grid; gap: 6mm; }
+    .court-wrap { overflow: visible !important; }
+                /* Make the table consume the full printable height; distribute rows by round count */
+                .page { height: calc(297mm - 14mm); }
+                section.court-group { height: 100%; }
+                .court-wrap { height: 100%; }
+                table { height: 100%; }
+                :root { --thead-row-h: 9mm; }
+                thead tr { height: var(--thead-row-h); }
+                tbody tr { height: calc((100% - (2 * var(--thead-row-h))) / var(--rounds)); }
+                tbody td { vertical-align: middle; }
+        /* Default (3コート/枚相当の密度) */
+        table { min-width: 0 !important; font-size: 9pt; line-height: 1.15; }
+        th, td { padding: 1.3mm 1.6mm; }
+        td.team small { font-size: 8pt; }
+
+        /* 1〜2コート/枚は縦が余りやすいので、字を大きくして読みやすさ優先 */
+        body.cpp-2 { --thead-row-h: 10mm; }
+        body.cpp-2 table { font-size: 11.5pt; line-height: 1.18; }
+        body.cpp-2 th, body.cpp-2 td { padding: 2.0mm 2.1mm; }
+        body.cpp-2 td.team small { font-size: 10.25pt; }
+
+        body.cpp-1 { --thead-row-h: 11mm; }
+        body.cpp-1 table { font-size: 13pt; line-height: 1.2; }
+        body.cpp-1 th, body.cpp-1 td { padding: 2.4mm 2.4mm; }
+        body.cpp-1 td.team small { font-size: 11.5pt; }
+    /* Sticky is not needed for print */
+    th.round-col, td.round, th.time-col, td.time { position: static !important; }
+  h2 { margin-top: 0; }
+    section.court-group { break-inside: avoid; page-break-inside: avoid; }
+    table, tr, td, th { break-inside: avoid; page-break-inside: avoid; }
+}
+</style>
+            """
+        )
+        fh.write(f"</head><body class='cpp-{int(cpp)}'>")
+        fh.write("<h1>壁貼り用（コート別）</h1>")
+        note = "印刷は Ctrl+P。1枚に表示するコート数は --wall-courts-per-page で調整できます。"
+        fh.write(
+            "<p class='note'><strong>印刷の倍率（Scale）を確認/調整してください（例: 100%）。</strong><br>"
+            + escape(note)
+            + "</p>"
+        )
+
+        court_list = list(range(1, courts + 1))
+        for page_start in range(0, len(court_list), cpp):
+            chunk = court_list[page_start : page_start + cpp]
+            fh.write(f"<div class='page' style='--rounds:{int(num_rounds)}'>")
+            fh.write("<section class='court-group'>")
+            if len(chunk) == 1:
+                fh.write(f"<h2>コート{chunk[0]}</h2>")
+            else:
+                fh.write(f"<h2>コート{chunk[0]}〜{chunk[-1]}</h2>")
+
+            fh.write("<div class='court-wrap'>")
+            fh.write("<table><thead>")
+
+            # Header row 1: shared left columns + per-court group headers
+            fh.write("<tr>")
+            fh.write("<th class='round-col' rowspan='2'>試合</th>")
+            fh.write("<th class='time-col' rowspan='2'>開始</th>")
+            for court in chunk:
+                fh.write(f"<th class='court-head group-start group-end' colspan='4'>コート{court}</th>")
+            fh.write("</tr>")
+
+            # Header row 2: per-court columns
+            fh.write("<tr>")
+            for _court in chunk:
+                fh.write("<th class='group-start'>チーム1</th>")
+                fh.write("<th>チーム2</th>")
+                fh.write("<th class='score-col'>得点（チーム1）</th>")
+                fh.write("<th class='score-col group-end'>得点（チーム2）</th>")
+            fh.write("</tr>")
+
+            fh.write("</thead><tbody>")
+            for round_num in range(1, num_rounds + 1):
+                tr_class = "last-round" if round_num == num_rounds else ""
+                fh.write(f"<tr class='{tr_class}'>")
+                fh.write(f"<td class='round'>第{round_num}試合</td>")
+                fh.write(f"<td class='time'>{escape(round_start_hhmm(round_num))}</td>")
+
+                for court in chunk:
+                    m = mc_lookup.get((round_num, court))
+                    t1 = m.team1 if m else None
+                    t2 = m.team2 if m else None
+                    t1_html = render_team_cell(t1) if t1 else ""
+                    t2_html = render_team_cell(t2) if t2 else ""
+                    t1_group = _team_group_key(t1.name) if t1 and t1.name else ""
+                    t2_group = _team_group_key(t2.name) if t2 and t2.name else ""
+                    t1_bg = bg_by_group.get(t1_group, "") if t1_group else ""
+                    t2_bg = bg_by_group.get(t2_group, "") if t2_group else ""
+                    t1_base = base_by_group.get(t1_group, "") if t1_group else ""
+                    t2_base = base_by_group.get(t2_group, "") if t2_group else ""
+
+                    def _cell_style(bg: str, base: str) -> str:
+                        parts: list[str] = []
+                        if cell_background and bg:
+                            parts.append(f"background-color:{bg}")
+                        # Strong visual marker that prints even when background is disabled.
+                        if base:
+                            parts.append(
+                                f"box-shadow: inset 16px 0 0 0 {base}, inset 0 0 0 3px {base}"
+                            )
+                        if not parts:
+                            return ""
+                        return " style='" + "; ".join(parts) + ";'"
+
+                    t1_style = _cell_style(escape(t1_bg), escape(t1_base))
+                    t2_style = _cell_style(escape(t2_bg), escape(t2_base))
+                    fh.write(f"<td class='team group-start group-mid'{t1_style}>{t1_html}</td>")
+                    fh.write(f"<td class='team group-mid'{t2_style}>{t2_html}</td>")
+                    fh.write(f"<td class='score group-mid'></td>")
+                    fh.write(f"<td class='score group-end group-mid'></td>")
+
+                fh.write("</tr>")
+            fh.write("</tbody></table></div></section>")
+            fh.write("</div>")
+
+        fh.write("</body></html>")
+
 import typer
 
 app = typer.Typer()
+
+
+_WALL_COLOR_ALIASES: dict[str, str] = {
+    "red": "#d60000",
+    "r": "#d60000",
+    "blue": "#0057d6",
+    "b": "#0057d6",
+    "green": "#0a8f2a",
+    "g": "#0a8f2a",
+    "orange": "#d66a00",
+    "o": "#d66a00",
+    "purple": "#6b2bd6",
+    "p": "#6b2bd6",
+    "gray": "#666666",
+    "grey": "#666666",
+    "yellow": "#b59a00",
+    "y": "#b59a00",
+}
+
+
+def _parse_wall_team_color_rules(values: list[str]) -> list[tuple[str, str]]:
+    """Parse repeated --wall-team-color values like '蛇口:red'.
+
+    - Keyword match: substring match against team name.
+    - Priority: first match wins (order of options).
+    - Color is one of: red/blue/green/orange/purple/gray/yellow
+    """
+
+    rules: list[tuple[str, str]] = []
+    for raw in values:
+        if raw is None:
+            continue
+        s = str(raw).strip()
+        if not s:
+            continue
+        sep = ":" if ":" in s else ("：" if "：" in s else "")
+        if not sep:
+            raise typer.BadParameter("--wall-team-color は 'キーワード:色' 形式で指定してください。例: 蛇口:red")
+        keyword, color_raw = s.split(sep, 1)
+        keyword = keyword.strip()
+        color_key = color_raw.strip().lower()
+        if not keyword:
+            raise typer.BadParameter("--wall-team-color のキーワードが空です")
+        base_hex: str | None = None
+        if color_key in _WALL_COLOR_ALIASES:
+            base_hex = _WALL_COLOR_ALIASES[color_key]
+        else:
+            # Accept hex like #RRGGBB or RRGGBB
+            hex_candidate = color_key
+            if hex_candidate.startswith("#"):
+                hex_candidate = hex_candidate[1:]
+            if len(hex_candidate) == 6 and all(c in "0123456789abcdef" for c in hex_candidate):
+                base_hex = f"#{hex_candidate}"
+        if not base_hex:
+            allowed = ", ".join(sorted(_WALL_COLOR_ALIASES.keys())) + ", #RRGGBB"
+            raise typer.BadParameter(f"不明な色: {color_raw}（利用可能: {allowed}）")
+        rules.append((keyword, base_hex))
+    return rules
 
 
 def _coerce_hhmm(value: Any) -> str | None:
@@ -4341,6 +5541,11 @@ def _coerce_hhmm(value: Any) -> str | None:
         v = value.strip()
         if not v:
             return None
+        # Accept ranges like '13:29-13:42' (take start).
+        for sep in ("-", "－", "–", "—", "〜", "～"):
+            if sep in v:
+                v = v.split(sep, 1)[0].strip()
+                break
         # accept HH:MM or H:MM
         parts = v.split(":")
         if len(parts) == 2:
@@ -4379,6 +5584,20 @@ def load_schedule_from_xlsx(schedule_xlsx: str, *, fallback_start_time_hhmm: str
     ws = wb["対戦表"]
 
     teams_by_name: dict[str, Team] = {}
+
+    def split_team_cell(value: Any) -> tuple[str, str]:
+        """Parse a team cell that may contain 'TeamName\nMember1, Member2'."""
+        if value is None:
+            return "", ""
+        raw = str(value).replace("\r", "\n").strip()
+        if not raw:
+            return "", ""
+        lines = [ln.strip() for ln in raw.split("\n") if ln.strip()]
+        if not lines:
+            return "", ""
+        name = lines[0]
+        members = " ".join(lines[1:]).strip() if len(lines) > 1 else ""
+        return name, members
     if "ペア一覧" in wb.sheetnames:
         ws_pairs = wb["ペア一覧"]
         # header: ペア名, 選手名, レベル, グループ, 試合数
@@ -4393,14 +5612,22 @@ def load_schedule_from_xlsx(schedule_xlsx: str, *, fallback_start_time_hhmm: str
             group = str(row[3]).strip() if len(row) > 3 and row[3] is not None else ""
             teams_by_name[name] = Team(name=name, members=members, level=level, group=group)
 
-    def get_team(name_raw: Any) -> Team:
+    def get_team(name_raw: Any, *, members_hint: str = "") -> Team:
         name = str(name_raw).strip() if name_raw is not None else ""
         if not name:
             raise ValueError("対戦表に空のチーム名が含まれています")
         if name in teams_by_name:
-            return teams_by_name[name]
-        teams_by_name[name] = Team(name=name, members="", level="", group="")
-        return teams_by_name[name]
+            team = teams_by_name[name]
+        else:
+            team = Team(name=name, members="", level="", group="")
+            teams_by_name[name] = team
+
+        # Prefer the 'ペア一覧' sheet as the source of truth for member names.
+        # Only use embedded members text from the match table when we don't have
+        # members in the pair list (e.g. legacy exports without a reliable pair list).
+        if members_hint and not team.members:
+            team.members = members_hint
+        return team
 
     max_col = ws.max_column
     if max_col < 5:
@@ -4469,19 +5696,662 @@ def load_schedule_from_xlsx(schedule_xlsx: str, *, fallback_start_time_hhmm: str
             t2 = ws.cell(row=row_idx, column=col_team2).value
             if t1 is None and t2 is None:
                 continue
-            t1s = str(t1).strip() if t1 is not None else ""
-            t2s = str(t2).strip() if t2 is not None else ""
+            t1n, t1m = split_team_cell(t1)
+            t2n, t2m = split_team_cell(t2)
+            t1s = t1n
+            t2s = t2n
             if not t1s and not t2s:
                 continue
             if not t1s or not t2s:
                 raise ValueError(f"対戦表に片側だけチーム名があります: round={round_num} court={court}")
-            team1 = get_team(t1s)
-            team2 = get_team(t2s)
+            team1 = get_team(t1s, members_hint=t1m)
+            team2 = get_team(t2s, members_hint=t2m)
             matches.append(Match(round_num=round_num, court=court, team1=team1, team2=team2, start_time=start_dt))
 
     num_rounds = max(detected_rounds) if detected_rounds else 0
     teams = list(teams_by_name.values())
     return matches, teams, num_rounds, courts
+
+
+def load_schedule_from_short_list_xlsx(
+    workbook_path: str,
+    *,
+    sheet_name: str = "対戦一覧_短縮",
+    fallback_start_time_hhmm: str = DEFAULT_START_TIME_HHMM,
+    fallback_round_minutes: int = DEFAULT_ROUND_MINUTES,
+) -> tuple[list[Match], list[Team], int, int]:
+    """Load matches from a 'short list' sheet in an external workbook (xlsm/xlsx).
+
+    Expected columns (typical):
+      試合, コート, 時間, ペア名, 選手名, 相手ペア名, 相手選手名
+
+    We infer rounds by grouping matches with the same start time (in appearance order).
+    """
+
+    # openpyxl emits a noisy warning when a workbook has a print-area defined name
+    # that it can't re-apply exactly; it's safe for our use (we only read cell values).
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=r"Print area cannot be set to Defined name:.*",
+            category=UserWarning,
+        )
+        wb = openpyxl.load_workbook(workbook_path, data_only=True)
+
+    preferred_sheet_names = [
+        sheet_name,
+        "対戦一覧_短縮",
+        "対戦一覧短縮（試合順）",
+        "対戦一覧短縮（チーム順）",
+        "全対戦リスト",
+    ]
+    ws = None
+    for s in preferred_sheet_names:
+        if s in wb.sheetnames:
+            ws = wb[s]
+            break
+    if ws is None:
+        raise ValueError(
+            "入力Excelに短縮対戦リストが見つかりません。"
+            f"探した候補: {preferred_sheet_names} / 実際のシート: {wb.sheetnames}"
+        )
+
+    header_row = [cell.value for cell in next(ws.iter_rows(min_row=1, max_row=1))]
+
+    def _norm(v: Any) -> str:
+        return str(v).strip() if v is not None else ""
+
+    def _find_col(pred) -> int | None:
+        for idx, h in enumerate(header_row):
+            if pred(_norm(h)):
+                return idx
+        return None
+
+    def _parse_match_no(value: Any) -> int | None:
+        if value is None:
+            return None
+        # Typical formats: '第04', '第4', 4
+        s = str(value).strip()
+        if not s:
+            return None
+        s = s.replace("試合", "").replace("第", "").replace("回", "").strip()
+        # keep only leading digits
+        digits = "".join(ch for ch in s if ch.isdigit())
+        if not digits:
+            return None
+        try:
+            n = int(digits)
+        except Exception:
+            return None
+        return n if n > 0 else None
+
+    col_match_no = _find_col(lambda s: s == "試合" or "試合" in s)
+    col_court = _find_col(lambda s: "コート" in s)  # required
+    col_time = _find_col(lambda s: ("時間" in s) or (s == "開始") or ("開始" in s and "終了" not in s))
+    col_pair = _find_col(
+        lambda s: (
+            s == "ペア名"
+            or ("ペア名" in s and "相手" not in s)
+            or ("チーム" in s and "相手" not in s and ("クラス" in s or "+" in s))
+            or s == "チーム＋クラス"
+        )
+    )
+    col_members = _find_col(lambda s: (s == "選手名" or s == "氏名" or ("選手名" in s and "相手" not in s) or ("氏名" in s and "相手" not in s)))
+    col_opp_pair = _find_col(
+        lambda s: (
+            ("相手" in s and "ペア名" in s)
+            or s == "相手ペア名"
+            or s == "相手チーム＋クラス"
+            or ("相手" in s and "チーム" in s and ("クラス" in s or "+" in s))
+        )
+    )
+    col_opp_members = _find_col(lambda s: ("相手" in s and ("選手名" in s or "氏名" in s)) or s in ("相手選手名", "相手氏名"))
+
+    if col_court is None or col_pair is None or col_opp_pair is None:
+        raise ValueError(
+            "短縮対戦リストの必須列が見つかりません（最低限: コート, ペア名, 相手ペア名）。"
+            f"ヘッダー: {header_row}"
+        )
+
+    teams_by_name: dict[str, Team] = {}
+
+    def _get_team(name: str, members: str) -> Team:
+        nm = name.strip()
+        if nm in teams_by_name:
+            t = teams_by_name[nm]
+        else:
+            t = Team(name=nm, members="", level="", group="")
+            teams_by_name[nm] = t
+        if members and not t.members:
+            t.members = members
+        return t
+
+    last_time_hhmm: str | None = None
+    max_court = 0
+    matches: list[Match] = []
+    times_seen: list[str] = []
+    rounds_seen: list[int] = []
+    seen_match_keys: set[tuple[str, int, frozenset[str]]] = set()
+
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        if not row or all(v is None or str(v).strip() == "" for v in row):
+            continue
+
+        court_raw = row[col_court] if col_court < len(row) else None
+        if court_raw is None or str(court_raw).strip() == "":
+            continue
+        try:
+            court = int(float(court_raw))
+        except Exception:
+            # skip rows that don't look like matches
+            continue
+        if court <= 0:
+            continue
+
+        match_no_raw = row[col_match_no] if (col_match_no is not None and col_match_no < len(row)) else None
+        match_no = _parse_match_no(match_no_raw)
+
+        time_raw = row[col_time] if (col_time is not None and col_time < len(row)) else None
+        time_hhmm = _coerce_hhmm(time_raw)
+        if not time_hhmm:
+            # Some workbooks omit time in repeated rows; carry forward.
+            if last_time_hhmm:
+                time_hhmm = last_time_hhmm
+            else:
+                time_hhmm = fallback_start_time_hhmm
+        last_time_hhmm = time_hhmm
+
+        pair_name = _norm(row[col_pair] if col_pair < len(row) else "")
+        opp_pair_name = _norm(row[col_opp_pair] if col_opp_pair < len(row) else "")
+        if not pair_name or not opp_pair_name:
+            continue
+
+        members = _norm(row[col_members] if (col_members is not None and col_members < len(row)) else "")
+        opp_members = _norm(row[col_opp_members] if (col_opp_members is not None and col_opp_members < len(row)) else "")
+
+        start_dt = _base_datetime_from_hhmm(time_hhmm)
+
+        team1 = _get_team(pair_name, members)
+        team2 = _get_team(opp_pair_name, opp_members)
+
+        key = (time_hhmm, court, frozenset({team1.name, team2.name}))
+        if key in seen_match_keys:
+            # Likely a "both perspectives" list (two rows per match). Avoid double-counting.
+            continue
+        seen_match_keys.add(key)
+
+        matches.append(Match(round_num=match_no or 0, court=court, team1=team1, team2=team2, start_time=start_dt))
+        max_court = max(max_court, court)
+        times_seen.append(time_hhmm)
+        if match_no:
+            rounds_seen.append(match_no)
+
+    teams = list(teams_by_name.values())
+    # Infer level/group from name when the summary workbook doesn't carry them.
+    for t in teams:
+        if not t.level:
+            levels = [c for c in t.name if c in "ABC"]
+            t.level = levels[0] if levels else ""
+        if not t.group:
+            # Keep the same style as create_team_list.py: strip trailing digits.
+            try:
+                t.group = t.name.rstrip("0123456789")
+            except Exception:
+                t.group = t.group or ""
+    if rounds_seen:
+        # Prefer explicit match numbers if present (most accurate for ordering).
+        num_rounds = max(rounds_seen)
+    else:
+        # Fallback: assign round numbers by chronological time order.
+        unique_times = sorted(set(times_seen), key=_base_datetime_from_hhmm)
+        time_to_round: dict[str, int] = {t: i + 1 for i, t in enumerate(unique_times)}
+        for m in matches:
+            m.round_num = time_to_round[m.start_time.strftime("%H:%M")]
+        num_rounds = len(unique_times)
+
+    matches.sort(key=lambda m: (m.round_num, m.court))
+    courts = max_court
+    refresh_team_stats(teams, matches)
+    return matches, teams, num_rounds, courts
+
+
+def write_matches_into_summary_sheet_grid(
+    wb: openpyxl.Workbook,
+    matches: list[Match],
+    *,
+    target_sheet_name: str = "集計表",
+    header_row: int = 2,
+    first_match_row: int = 3,
+    rows_per_match: int = 3,
+    match_no_col: int = 1,
+    time_col: int = 2,
+    first_court_col: int = 3,
+    clear_scores: bool = True,
+) -> tuple[int, int]:
+    """Fill a macro-style summary sheet grid (3 rows per match).
+
+    Typical layout in the summary workbook:
+    - Row `first_match_row`: match no, start time, and pair names per court (2 cols per court)
+    - Row +1: formulas (e.g., end time, VLOOKUP for members)
+    - Row +2: score entry row
+
+    This function only writes the pair-name rows + (optionally) clears score cells.
+    It deliberately avoids overwriting formula rows.
+
+    Returns (num_rounds_written, courts_detected).
+    """
+
+    if target_sheet_name not in wb.sheetnames:
+        raise ValueError(f"target sheet not found: {target_sheet_name}")
+    ws = wb[target_sheet_name]
+    if not matches:
+        raise ValueError("matches is empty")
+
+    # Infer court count from header row (e.g., 1,2,3... at every other column)
+    courts = 0
+    col = int(first_court_col)
+    while True:
+        v = ws.cell(row=int(header_row), column=col).value
+        if v is None or str(v).strip() == "":
+            break
+        try:
+            n = int(float(v))
+        except Exception:
+            break
+        courts = max(courts, n)
+        col += 2
+    if courts <= 0:
+        # Fallback to observed max court
+        courts = max(int(m.court) for m in matches)
+
+    # Prefer explicit round count from matches.
+    num_rounds = max(int(m.round_num) for m in matches)
+    by_slot: dict[tuple[int, int], Match] = {(int(m.round_num), int(m.court)): m for m in matches}
+
+    for rnd in range(1, num_rounds + 1):
+        base_row = int(first_match_row) + (rnd - 1) * int(rows_per_match)
+
+        ws.cell(row=base_row, column=int(match_no_col)).value = rnd
+
+        # Start time: take the earliest match time in this round.
+        round_matches = [by_slot[(rnd, c)] for c in range(1, courts + 1) if (rnd, c) in by_slot]
+        if round_matches:
+            start_dt = min(m.start_time for m in round_matches)
+            try:
+                ws.cell(row=base_row, column=int(time_col)).value = start_dt.time()
+            except Exception:
+                ws.cell(row=base_row, column=int(time_col)).value = start_dt
+        else:
+            ws.cell(row=base_row, column=int(time_col)).value = None
+
+        for court in range(1, courts + 1):
+            c1 = int(first_court_col) + (court - 1) * 2
+            c2 = c1 + 1
+            m = by_slot.get((rnd, court))
+            if m:
+                ws.cell(row=base_row, column=c1).value = m.team1.name
+                ws.cell(row=base_row, column=c2).value = m.team2.name
+            else:
+                ws.cell(row=base_row, column=c1).value = None
+                ws.cell(row=base_row, column=c2).value = None
+
+            if clear_scores:
+                score_row = base_row + 2
+                ws.cell(row=score_row, column=c1).value = None
+                ws.cell(row=score_row, column=c2).value = None
+
+    return num_rounds, courts
+
+
+@app.command()
+def sync_pairs_from_team_list(
+    schedule_file: str = typer.Option(..., help="更新対象のスケジュールExcel（'ペア一覧' を含むこと）"),
+    team_list_file: str = typer.Option(..., help="最新のチーム一覧Excel（チームリスト.xlsx 等。氏名/レベル/グループのマスター）"),
+    output_file: str = typer.Option("", help="出力Excel。空なら schedule_file の末尾に _pairsynced を付ける"),
+):
+    """Sync the 'ペア一覧' sheet in a schedule workbook from a team list workbook.
+
+    Use this when member names change frequently and you want a single source of truth
+    (e.g. 集計表 → create_team_list.py でチームリスト.xlsxを作る → このコマンドでスケジュールへ反映)。
+
+    Notes:
+    - Only updates rows that already exist in 'ペア一覧' (by ペア名 match).
+    - Does not touch '対戦表' matchups.
+    """
+
+    in_path = Path(schedule_file)
+    if not in_path.exists():
+        raise typer.BadParameter(f"入力ファイルが見つかりません: {schedule_file}")
+    tl_path = Path(team_list_file)
+    if not tl_path.exists():
+        raise typer.BadParameter(f"チーム一覧ファイルが見つかりません: {team_list_file}")
+
+    out_path = Path(output_file) if output_file else in_path.with_name(f"{in_path.stem}_pairsynced{in_path.suffix}")
+
+    # Load the latest teams from the team list workbook
+    teams = load_teams(str(tl_path))
+    if not teams:
+        raise typer.BadParameter(f"チーム一覧が空です: {team_list_file}")
+    latest_by_name: dict[str, Team] = {t.name: t for t in teams if t.name}
+
+    try:
+        wb = openpyxl.load_workbook(str(in_path))
+    except PermissionError:
+        raise typer.BadParameter(
+            f"Excelファイルを開いたままの可能性があります。Excelを閉じてから再実行してください: {schedule_file}"
+        )
+    if "ペア一覧" not in wb.sheetnames:
+        raise typer.BadParameter("Excelに 'ペア一覧' シートが見つかりません")
+
+    ws = wb["ペア一覧"]
+    header = [ws.cell(row=1, column=c).value for c in range(1, ws.max_column + 1)]
+
+    def _find_col(*candidates: str) -> int | None:
+        for idx, v in enumerate(header, start=1):
+            if isinstance(v, str) and v.strip() in candidates:
+                return idx
+        return None
+
+    col_name = _find_col("ペア名") or 1
+    col_members = _find_col("選手名", "氏名") or 2
+    col_level = _find_col("レベル") or 3
+    col_group = _find_col("グループ") or 4
+
+    updated = 0
+    missing_in_team_list: set[str] = set()
+
+    for row in range(2, ws.max_row + 1):
+        name_cell = ws.cell(row=row, column=col_name).value
+        name = str(name_cell).strip() if name_cell is not None else ""
+        if not name:
+            continue
+        src = latest_by_name.get(name)
+        if not src:
+            missing_in_team_list.add(name)
+            continue
+
+        ws.cell(row=row, column=col_members).value = src.members
+        ws.cell(row=row, column=col_level).value = src.level
+        ws.cell(row=row, column=col_group).value = src.group
+        updated += 1
+
+    wb.save(str(out_path))
+    wb.close()
+
+    print(f"ペア一覧を同期しました: {out_path}")
+    print(f"  更新行数: {updated} / チーム一覧件数: {len(latest_by_name)}")
+    if missing_in_team_list:
+        # keep output short
+        sample = sorted(list(missing_in_team_list))[:8]
+        suffix = " ..." if len(missing_in_team_list) > len(sample) else ""
+        print(f"  注意: チーム一覧に無いペア名がペア一覧にあります: {', '.join(sample)}{suffix}")
+
+
+@app.command()
+def export_from_summary(
+    input_file: str = typer.Option(..., help="集計表（.xlsx/.xlsm）。'対戦一覧_短縮' シートを含むこと"),
+    sheet_name: str = typer.Option("対戦一覧_短縮", help="読み込む短縮対戦リストのシート名"),
+    output_file: str = typer.Option("", help="出力Excel。空なら input_file と同名で _from_summary.xlsx"),
+    html_passcode: str = typer.Option("", help="HTMLの簡易ロック用パスコード（注意: 完全な暗号化ではありません）"),
+    include_members: bool = typer.Option(True, help="HTMLに選手名（氏名）を含める（短縮シートに氏名がある前提）"),
+    wall_html: bool = typer.Option(False, help="壁貼り用（コート別）HTMLも出力する（印刷前提・JS不要）"),
+    wall_courts_per_page: int = typer.Option(2, help="壁貼り用HTMLの1ページあたりコート数（1〜3推奨）。標準は2"),
+    wall_team_color: list[str] = typer.Option(
+        [],
+        "--wall-team-color",
+        help="壁貼り用のチーム色分け（複数可）。例: --wall-team-color '蛇口:red' --wall-team-color '上海:blue'",
+    ),
+    wall_auto_colors: bool = typer.Option(
+        True,
+        "--wall-auto-colors/--no-wall-auto-colors",
+        help="壁貼り用HTMLで、未指定チームも自動で色付けする（デフォルトON）",
+    ),
+    wall_cell_background: bool = typer.Option(
+        False,
+        "--wall-cell-background/--no-wall-cell-background",
+        help="壁貼り用HTMLのチームセル背景色を塗る（デフォルトOFF）。背景印刷がOFFになりがちなのでOFF推奨",
+    ),
+    allow_court_gaps: bool = typer.Option(True, help="空きコートを許容する（集計表由来ではON推奨）"),
+    round_minutes: int = typer.Option(DEFAULT_ROUND_MINUTES, help="1試合の時間（分）。終了時刻の計算に使用"),
+    excel_include_members: bool = typer.Option(False, help="Excelの『対戦表』セルに選手名（氏名）を改行で表示する"),
+    excel_members_below: bool = typer.Option(False, help="Excelの『対戦表』を2行構成にする（上=ペア名、下=選手名）"),
+    excel_members_vlookup: bool = typer.Option(False, help="『選手名』行をペア一覧からVLOOKUPで自動表示する（ペア名セルをキー）。※Excelで開いて計算が必要"),
+    start_time: str = typer.Option(DEFAULT_START_TIME_HHMM, help="開始時刻 (HH:MM) ※時間列が欠けている場合の補助"),
+):
+    """Export schedule Excel/HTML from an existing summary workbook.
+
+    This is for workflows where the "source of truth" is an external 集計表 (xlsm)
+    that already contains a match list sheet (対戦一覧_短縮).
+    """
+
+    if round_minutes <= 0:
+        raise typer.BadParameter("round_minutes は 1 以上を指定してください")
+    try:
+        _parse_hhmm(start_time)
+    except ValueError as e:
+        raise typer.BadParameter(str(e))
+
+    in_path = Path(input_file)
+    if not in_path.exists():
+        raise typer.BadParameter(f"入力ファイルが見つかりません: {input_file}")
+
+    out_path = Path(output_file) if output_file else in_path.with_name(f"{in_path.stem}_from_summary.xlsx")
+
+    try:
+        matches, teams, num_rounds, courts = load_schedule_from_short_list_xlsx(
+            str(in_path),
+            sheet_name=str(sheet_name),
+            fallback_start_time_hhmm=start_time,
+            fallback_round_minutes=int(round_minutes),
+        )
+    except PermissionError:
+        raise typer.BadParameter(
+            f"Excelファイルを開いたままの可能性があります。Excelを閉じてから再実行してください: {input_file}"
+        )
+
+    if num_rounds <= 0 or courts <= 0 or not matches:
+        raise RuntimeError("短縮対戦リストから試合を読み取れませんでした（列名やシート名を確認してください）")
+
+    # Keep original times from the summary sheet (do not override by uniform round minutes).
+    write_to_excel_like_summary(
+        matches,
+        teams,
+        str(out_path),
+        bool(allow_court_gaps),
+        num_rounds,
+        courts,
+        start_time_hhmm=start_time,
+        round_minutes=int(round_minutes),
+        excel_include_members=bool(excel_include_members),
+        excel_members_below=bool(excel_members_below),
+        excel_members_vlookup=bool(excel_members_vlookup),
+        normalize_round_times=False,
+    )
+
+    html_output_path = out_path.with_suffix('.html')
+    write_personal_schedule_html(
+        matches,
+        teams,
+        str(html_output_path),
+        num_rounds=num_rounds,
+        courts=courts,
+        html_passcode=html_passcode or None,
+        start_time_hhmm=start_time,
+        round_minutes=int(round_minutes),
+        include_members=bool(include_members),
+    )
+    if wall_html:
+        wall_rules = _parse_wall_team_color_rules(list(wall_team_color))
+        wall_output_path = out_path.with_name(f"{out_path.stem}_wall.html")
+        write_wall_schedule_html(
+            matches,
+            str(wall_output_path),
+            num_rounds=num_rounds,
+            courts=courts,
+            start_time_hhmm=start_time,
+            round_minutes=int(round_minutes),
+            courts_per_page=int(wall_courts_per_page),
+            team_color_rules=wall_rules,
+            auto_team_colors=bool(wall_auto_colors),
+            cell_background=bool(wall_cell_background),
+        )
+
+    print(f"Excel出力: {out_path}")
+    print(f"HTML一式(対戦表+短縮+個人): {html_output_path}")
+    if wall_html:
+        print(f"壁貼り用HTML(コート別): {wall_output_path}")
+    print(f"読込元: {in_path} / シート: {sheet_name}")
+    print(f"総試合数: {len(matches)} / ラウンド数: {num_rounds} / コート数: {courts}")
+
+
+@app.command()
+def fill_summary_grid(
+    input_file: str = typer.Option(..., help="集計表（.xlsx/.xlsm）。'対戦一覧_短縮' から '集計表' の対戦表入力欄に流し込む"),
+    sheet_name: str = typer.Option("対戦一覧_短縮", help="読み込む短縮対戦リストのシート名"),
+    target_sheet: str = typer.Option("集計表", help="流し込み先シート名（3行=1試合の入力シート）"),
+    output_file: str = typer.Option("", help="出力ファイル。空なら input_file と同名で _filled を付ける"),
+    clear_scores: bool = typer.Option(True, help="流し込み時に得点欄をクリアする"),
+    start_time: str = typer.Option(DEFAULT_START_TIME_HHMM, help="開始時刻 (HH:MM) ※時間列が欠けている場合の補助"),
+    round_minutes: int = typer.Option(DEFAULT_ROUND_MINUTES, help="1試合の時間（分）。時間列が欠けている場合の補助"),
+):
+    """Fill the summary workbook's match-input grid from 対戦一覧_短縮.
+
+    This automates the "23ラウンド分コピペ" work: pair names are written into the
+    macro-friendly grid on the target sheet while preserving formulas/macros.
+    """
+
+    if round_minutes <= 0:
+        raise typer.BadParameter("round_minutes は 1 以上を指定してください")
+    try:
+        _parse_hhmm(start_time)
+    except ValueError as e:
+        raise typer.BadParameter(str(e))
+
+    in_path = Path(input_file)
+    if not in_path.exists():
+        raise typer.BadParameter(f"入力ファイルが見つかりません: {input_file}")
+
+    out_path = Path(output_file) if output_file else in_path.with_name(f"{in_path.stem}_filled{in_path.suffix}")
+
+    try:
+        matches, _teams, _num_rounds, _courts = load_schedule_from_short_list_xlsx(
+            str(in_path),
+            sheet_name=str(sheet_name),
+            fallback_start_time_hhmm=start_time,
+            fallback_round_minutes=int(round_minutes),
+        )
+    except PermissionError:
+        raise typer.BadParameter(
+            f"Excelファイルを開いたままの可能性があります。Excelを閉じてから再実行してください: {input_file}"
+        )
+
+    if not matches:
+        raise RuntimeError("短縮対戦リストから試合を読み取れませんでした（列名やシート名を確認してください）")
+
+    try:
+        with warnings.catch_warnings():
+            # openpyxl emits a noisy warning when a workbook has a print-area defined name
+            # that it can't re-apply exactly; it's safe for our use (we only write cell values).
+            warnings.filterwarnings("ignore", message=r"Print area cannot be set to Defined name:.*", category=UserWarning)
+            wb = openpyxl.load_workbook(
+                str(in_path),
+                data_only=False,
+                keep_vba=(in_path.suffix.lower() == ".xlsm"),
+            )
+    except PermissionError:
+        raise typer.BadParameter(
+            f"Excelファイルを開いたままの可能性があります。Excelを閉じてから再実行してください: {input_file}"
+        )
+
+    num_rounds_written, courts_detected = write_matches_into_summary_sheet_grid(
+        wb,
+        matches,
+        target_sheet_name=str(target_sheet),
+        clear_scores=bool(clear_scores),
+    )
+
+    wb.save(str(out_path))
+    wb.close()
+
+    print(f"流し込み完了: {out_path}")
+    print(f"  対象シート: {target_sheet}")
+    print(f"  ラウンド数: {num_rounds_written} / コート数: {courts_detected} / 得点クリア: {clear_scores}")
+
+
+@app.command()
+def fill_summary_grid_from_xlsx(
+    schedule_file: str = typer.Option(..., help="（手で編集した後の）スケジュールExcel。'対戦表' を含むこと"),
+    summary_file: str = typer.Option(..., help="流し込み先の集計表（.xlsx/.xlsm）。マクロ/数式は保持"),
+    target_sheet: str = typer.Option("集計表", help="流し込み先シート名（3行=1試合の入力シート）"),
+    output_file: str = typer.Option("", help="出力ファイル。空なら summary_file と同名で _filled_from_xlsx を付ける"),
+    clear_scores: bool = typer.Option(True, help="流し込み時に得点欄をクリアする"),
+    start_time: str = typer.Option(DEFAULT_START_TIME_HHMM, help="開始時刻 (HH:MM) ※対戦表に開始が無い場合の補助"),
+    round_minutes: int = typer.Option(DEFAULT_ROUND_MINUTES, help="1試合の時間（分）。開始が無い場合の補助"),
+):
+    """Fill a summary workbook's match-input grid from an edited schedule Excel.
+
+    This matches the common workflow:
+      生成した schedule.xlsx を手で微修正 → 集計表(xlsm)の入力グリッドへ流し込み →
+      集計表マクロで 対戦一覧_短縮 を再生成 → Pythonで最終配布物(HTML/Excel)を出力。
+    """
+
+    if round_minutes <= 0:
+        raise typer.BadParameter("round_minutes は 1 以上を指定してください")
+    try:
+        _parse_hhmm(start_time)
+    except ValueError as e:
+        raise typer.BadParameter(str(e))
+
+    sched_path = Path(schedule_file)
+    if not sched_path.exists():
+        raise typer.BadParameter(f"入力ファイルが見つかりません: {schedule_file}")
+    summ_path = Path(summary_file)
+    if not summ_path.exists():
+        raise typer.BadParameter(f"入力ファイルが見つかりません: {summary_file}")
+
+    out_path = Path(output_file) if output_file else summ_path.with_name(f"{summ_path.stem}_filled_from_xlsx{summ_path.suffix}")
+
+    try:
+        matches, _teams, _num_rounds, _courts = load_schedule_from_xlsx(
+            str(sched_path),
+            fallback_start_time_hhmm=str(start_time),
+            fallback_round_minutes=int(round_minutes),
+        )
+    except PermissionError:
+        raise typer.BadParameter(
+            f"Excelファイルを開いたままの可能性があります。Excelを閉じてから再実行してください: {schedule_file}"
+        )
+
+    if not matches:
+        raise RuntimeError("スケジュールExcelから試合を読み取れませんでした（'対戦表' を確認してください）")
+
+    try:
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=r"Print area cannot be set to Defined name:.*", category=UserWarning)
+            wb = openpyxl.load_workbook(
+                str(summ_path),
+                data_only=False,
+                keep_vba=(summ_path.suffix.lower() == ".xlsm"),
+            )
+    except PermissionError:
+        raise typer.BadParameter(
+            f"Excelファイルを開いたままの可能性があります。Excelを閉じてから再実行してください: {summary_file}"
+        )
+
+    num_rounds_written, courts_detected = write_matches_into_summary_sheet_grid(
+        wb,
+        matches,
+        target_sheet_name=str(target_sheet),
+        clear_scores=bool(clear_scores),
+    )
+
+    wb.save(str(out_path))
+    wb.close()
+
+    print(f"流し込み完了: {out_path}")
+    print(f"  参照スケジュール: {sched_path}")
+    print(f"  対象集計表: {summ_path} / シート: {target_sheet}")
+    print(f"  ラウンド数: {num_rounds_written} / コート数: {courts_detected} / 得点クリア: {clear_scores}")
 
 
 @app.command()
@@ -4513,8 +6383,34 @@ def generate_schedule(
     graph_mode: bool = typer.Option(True, help="グラフ構築モードを使用 (必須条件安定化)"),
     allow_court_gaps: bool = typer.Option(False, help="途中ラウンドの空きコートを許容するか（審判運用のため通常はOFF推奨）"),
     max_consecutive: int = typer.Option(2, help="最大連戦数（2推奨）。満たせない場合は自動で3に緩和（2 or 3）"),
+    relax_max_consecutive: bool = typer.Option(
+        True,
+        "--relax-max-consecutive/--no-relax-max-consecutive",
+        help="連戦上限を満たせない場合に自動緩和する（max_consecutive=2 のとき 3 に緩和）。デフォルトON",
+    ),
     matches_per_team: int = typer.Option(0, help="各ペアの試合数。0で自動（全員同数を最優先）。例: 6"),
     html_passcode: str = typer.Option("", help="HTMLの簡易ロック用パスコード（注意: 完全な暗号化ではありません）"),
+    include_members: bool = typer.Option(False, help="HTMLに選手名（氏名）を含める（対戦表/短縮/個人に反映。通常はOFF推奨）"),
+    wall_html: bool = typer.Option(False, help="壁貼り用（コート別）HTMLも出力する（印刷前提・JS不要）"),
+    wall_courts_per_page: int = typer.Option(2, help="壁貼り用HTMLの1ページあたりコート数（1〜3推奨）。標準は2"),
+    wall_team_color: list[str] = typer.Option(
+        [],
+        "--wall-team-color",
+        help="壁貼り用のチーム色分け（複数可）。例: --wall-team-color '蛇口:red' --wall-team-color '上海:blue'",
+    ),
+    wall_auto_colors: bool = typer.Option(
+        True,
+        "--wall-auto-colors/--no-wall-auto-colors",
+        help="壁貼り用HTMLで、未指定チームも自動で色付けする（デフォルトON）",
+    ),
+    wall_cell_background: bool = typer.Option(
+        False,
+        "--wall-cell-background/--no-wall-cell-background",
+        help="壁貼り用HTMLのチームセル背景色を塗る（デフォルトOFF）。背景印刷がOFFになりがちなのでOFF推奨",
+    ),
+    excel_include_members: bool = typer.Option(False, help="Excelの『対戦表』セルに選手名（氏名）を改行で表示する（手修正しやすい。配布する場合は注意）"),
+    excel_members_below: bool = typer.Option(False, help="Excelの『対戦表』を2行構成にする（上=ペア名、下=選手名）。手修正/老眼運用向け"),
+    excel_members_vlookup: bool = typer.Option(False, help="『選手名』行をペア一覧からVLOOKUPで自動表示する（ペア名セルをキー）。※Excelで開いて計算が必要"),
     start_time: str = typer.Option(DEFAULT_START_TIME_HHMM, help="開始時刻 (HH:MM)"),
     round_minutes: int = typer.Option(DEFAULT_ROUND_MINUTES, help="1ラウンドの時間（分）"),
 ):
@@ -4525,128 +6421,163 @@ def generate_schedule(
     probe_teams = load_teams(input_file)
     if matches_per_team < 0:
         raise typer.BadParameter("matches_per_team は 0 以上を指定してください")
-    if matches_per_team == 0:
-        TARGET_MATCHES_PER_TEAM = compute_auto_matches_per_team(len(probe_teams), num_rounds, courts)
+    auto_mode = matches_per_team == 0
+    if auto_mode:
+        initial_target = compute_auto_matches_per_team(len(probe_teams), num_rounds, courts)
     else:
-        TARGET_MATCHES_PER_TEAM = matches_per_team
+        initial_target = matches_per_team
 
     if max_consecutive not in (2, 3):
         raise typer.BadParameter("max_consecutive は 2 または 3 を指定してください")
 
     capacity = num_rounds * courts
-    expected_matches_total = expected_total_matches(len(probe_teams), TARGET_MATCHES_PER_TEAM)
-    if (len(probe_teams) * TARGET_MATCHES_PER_TEAM) % 2 != 0:
-        raise typer.BadParameter(
-            f"不正な組合せ: ペア数={len(probe_teams)} と 目標={TARGET_MATCHES_PER_TEAM} では総試合数が整数になりません（ペア数が奇数の時は試合数は偶数が必要）"
-        )
-    if expected_matches_total > capacity:
-        raise typer.BadParameter(
-            f"容量不足: courts*num_rounds={capacity} 試合枠に対し、必要試合数={expected_matches_total}（ペア数={len(probe_teams)}, 目標={TARGET_MATCHES_PER_TEAM}試合/ペア）"
-        )
     if round_minutes <= 0:
         raise typer.BadParameter("round_minutes は 1 以上を指定してください")
     try:
         _parse_hhmm(start_time)
     except ValueError as e:
         raise typer.BadParameter(str(e))
-    print(f"目標試合数/ペア: {TARGET_MATCHES_PER_TEAM}（自動={matches_per_team==0}） / 必要試合数 {expected_matches_total} / 容量 {capacity}")
 
     best_matches: List[Match] | None = None
     best_teams: List[Team] | None = None
     best_score: int = -1
-    for attempt in range(diversity_attempts):
-        teams = load_teams(input_file)
-        # まずグラフ方式を試行
-        graph_ok = False
-        try:
-            matches = schedule_matches_graph(teams, num_rounds, courts, seed=attempt)
-            refresh_team_stats(teams, matches)
-            if all(t.matches == TARGET_MATCHES_PER_TEAM for t in teams) and len(matches) == expected_total_matches(len(teams), TARGET_MATCHES_PER_TEAM):
-                graph_ok = True
-        except Exception as e:
-            print(f"グラフ試行 {attempt} 失敗: {e}")
-        if not graph_ok:
-            # フォールバック: ヒューリスティック
-            print(f"フォールバックヒューリスティック使用 (試行 {attempt})")
+    tried_targets: Set[int] = set()
+    target_candidates = [initial_target] if not auto_mode else list(range(initial_target, 0, -1))
+    for target in target_candidates:
+        # Ensure total matches is an integer.
+        if (len(probe_teams) % 2 == 1) and (target % 2 == 1):
+            target -= 1
+        if target <= 0 or target in tried_targets:
+            continue
+        tried_targets.add(target)
+
+        expected_matches_total = expected_total_matches(len(probe_teams), target)
+        if (len(probe_teams) * target) % 2 != 0:
+            if auto_mode:
+                continue
+            raise typer.BadParameter(
+                f"不正な組合せ: ペア数={len(probe_teams)} と 目標={target} では総試合数が整数になりません（ペア数が奇数の時は試合数は偶数が必要）"
+            )
+        if expected_matches_total > capacity:
+            if auto_mode:
+                continue
+            raise typer.BadParameter(
+                f"容量不足: courts*num_rounds={capacity} 試合枠に対し、必要試合数={expected_matches_total}（ペア数={len(probe_teams)}, 目標={target}試合/ペア）"
+            )
+
+        TARGET_MATCHES_PER_TEAM = target
+        if target != initial_target:
+            print(f"自動調整: 目標試合数/ペアを {target} に下げて再試行します")
+        print(f"目標試合数/ペア: {TARGET_MATCHES_PER_TEAM}（自動={auto_mode}） / 必要試合数 {expected_matches_total} / 容量 {capacity}")
+
+        best_matches = None
+        best_teams = None
+        best_score = -1
+        for attempt in range(diversity_attempts):
             teams = load_teams(input_file)
-            matches = schedule_matches_heuristic(teams, num_rounds, courts, seed=attempt)
-            refresh_team_stats(teams, matches)
-        # 縦方向分散 + 帯再配置後処理
-        if all(t.matches == TARGET_MATCHES_PER_TEAM for t in teams) and len(matches) == expected_total_matches(len(teams), TARGET_MATCHES_PER_TEAM):
-            matches = rebalance_vertical_distribution(matches, teams, num_rounds, courts)
-            matches = enforce_segments_and_quotas(matches, teams, num_rounds, courts)
-            matches = balanced_round_reassignment(matches, num_rounds, courts)
-            matches = boost_group_diversity(matches, teams)
-            matches = reduce_back_to_back(matches, num_rounds, courts)
-            matches = tighten_level_bands(matches, num_rounds, courts)
-            # コート衝突修復
-            collisions = detect_collisions(matches)
-            if collisions:
-                print(f"衝突スロット数: {len(collisions)} → 修復試行")
-                matches = repair_collisions(matches, num_rounds, courts)
-                print(f"After repair, max round: {max(m.round_num for m in matches)}, min round: {min(m.round_num for m in matches)}")
-                print(f"After repair, max court: {max(m.court for m in matches)}, min court: {min(m.court for m in matches)}")
-                after = detect_collisions(matches)
-                if after:
-                    print(f"修復後も残る衝突: {len(after)}")
-            # Ensure we never exceed physical court capacity even if collision repair is imperfect.
-            matches = normalize_round_capacity(matches, num_rounds, courts)
-            matches = ensure_round_one_full(matches, num_rounds, courts)
-            if not allow_court_gaps:
-                matches = eliminate_mid_session_court_gaps(matches, num_rounds, courts)
-            matches = compact_court_usage(matches, num_rounds, courts)
+            # まずグラフ方式を試行
+            graph_ok = False
+            try:
+                matches = schedule_matches_graph(teams, num_rounds, courts, seed=attempt)
+                refresh_team_stats(teams, matches)
+                if all(t.matches == TARGET_MATCHES_PER_TEAM for t in teams) and len(matches) == expected_total_matches(len(teams), TARGET_MATCHES_PER_TEAM):
+                    graph_ok = True
+            except Exception as e:
+                print(f"グラフ試行 {attempt} 失敗: {e}")
+            if not graph_ok:
+                # フォールバック: ヒューリスティック
+                print(f"フォールバックヒューリスティック使用 (試行 {attempt})")
+                teams = load_teams(input_file)
+                matches = schedule_matches_heuristic(teams, num_rounds, courts, seed=attempt)
+                refresh_team_stats(teams, matches)
+            # 縦方向分散 + 帯再配置後処理
+            if all(t.matches == TARGET_MATCHES_PER_TEAM for t in teams) and len(matches) == expected_total_matches(len(teams), TARGET_MATCHES_PER_TEAM):
+                matches = rebalance_vertical_distribution(matches, teams, num_rounds, courts)
+                matches = enforce_segments_and_quotas(matches, teams, num_rounds, courts)
+                matches = balanced_round_reassignment(matches, num_rounds, courts)
+                matches = boost_group_diversity(matches, teams)
+                matches = reduce_back_to_back(matches, num_rounds, courts)
+                matches = tighten_level_bands(matches, num_rounds, courts)
+                # コート衝突修復
+                collisions = detect_collisions(matches)
+                if collisions:
+                    print(f"衝突スロット数: {len(collisions)} → 修復試行")
+                    matches = repair_collisions(matches, num_rounds, courts)
+                    print(f"After repair, max round: {max(m.round_num for m in matches)}, min round: {min(m.round_num for m in matches)}")
+                    print(f"After repair, max court: {max(m.court for m in matches)}, min court: {min(m.court for m in matches)}")
+                    after = detect_collisions(matches)
+                    if after:
+                        print(f"修復後も残る衝突: {len(after)}")
+                # Ensure we never exceed physical court capacity even if collision repair is imperfect.
+                matches = normalize_round_capacity(matches, num_rounds, courts)
+                matches = ensure_round_one_full(matches, num_rounds, courts)
+                if not allow_court_gaps:
+                    matches = eliminate_mid_session_court_gaps(matches, num_rounds, courts)
+                matches = compact_court_usage(matches, num_rounds, courts)
 
-            def _max_team_streak(ms: List[Match]) -> int:
-                rounds_map: Dict[str, List[int]] = defaultdict(list)
-                for m in ms:
-                    rounds_map[m.team1.name].append(m.round_num)
-                    rounds_map[m.team2.name].append(m.round_num)
-                best = 0
-                for rs in rounds_map.values():
-                    if not rs:
-                        continue
-                    sr = sorted(rs)
-                    cur = 1
-                    mx = 1
-                    for i in range(1, len(sr)):
-                        if sr[i] == sr[i - 1] + 1:
-                            cur += 1
-                            mx = max(mx, cur)
-                        else:
-                            cur = 1
-                    best = max(best, mx)
-                return best
+                def _max_team_streak(ms: List[Match]) -> int:
+                    rounds_map: Dict[str, List[int]] = defaultdict(list)
+                    for m in ms:
+                        rounds_map[m.team1.name].append(m.round_num)
+                        rounds_map[m.team2.name].append(m.round_num)
+                    best = 0
+                    for rs in rounds_map.values():
+                        if not rs:
+                            continue
+                        sr = sorted(rs)
+                        cur = 1
+                        mx = 1
+                        for i in range(1, len(sr)):
+                            if sr[i] == sr[i - 1] + 1:
+                                cur += 1
+                                mx = max(mx, cur)
+                            else:
+                                cur = 1
+                        best = max(best, mx)
+                    return best
 
-            def _consecutive_optimize(ms: List[Match], limit: int) -> List[Match]:
-                for _ in range(3):
-                    if _max_team_streak(ms) <= limit:
-                        break
-                    ms = reduce_max_consecutive_streak(ms, num_rounds, courts, max_consecutive=limit)
-                    ms = normalize_round_capacity(ms, num_rounds, courts)
-                    ms = ensure_round_one_full(ms, num_rounds, courts)
-                    if not allow_court_gaps:
-                        ms = eliminate_mid_session_court_gaps(ms, num_rounds, courts)
-                    ms = compact_court_usage(ms, num_rounds, courts)
-                return ms
+                def _consecutive_optimize(ms: List[Match], limit: int) -> List[Match]:
+                    for _ in range(3):
+                        if _max_team_streak(ms) <= limit:
+                            break
+                        ms = reduce_max_consecutive_streak(ms, num_rounds, courts, max_consecutive=limit)
+                        ms = normalize_round_capacity(ms, num_rounds, courts)
+                        ms = ensure_round_one_full(ms, num_rounds, courts)
+                        if not allow_court_gaps:
+                            ms = eliminate_mid_session_court_gaps(ms, num_rounds, courts)
+                        ms = compact_court_usage(ms, num_rounds, courts)
+                    return ms
 
-            matches = _consecutive_optimize(matches, limit=max_consecutive)
-            if max_consecutive == 2 and _max_team_streak(matches) > 2:
-                print("連戦上限2が満たせないため、連戦上限3に緩和します")
-                matches = _consecutive_optimize(matches, limit=3)
-        # 条件確認
-        if any(t.matches != TARGET_MATCHES_PER_TEAM for t in teams):
-            print(f"試行 {attempt}: 未達ペアあり -> スキップ")
-            continue
-        if len(matches) != expected_total_matches(len(teams), TARGET_MATCHES_PER_TEAM):
-            print(f"試行 {attempt}: 総試合数 {len(matches)} 不一致")
-            continue
-        score = compute_diversity_score(teams)
-        if score > best_score:
-            best_score = score
-            best_matches = matches
-            best_teams = teams
+                matches = _consecutive_optimize(matches, limit=max_consecutive)
+                if max_consecutive == 2 and _max_team_streak(matches) > 2:
+                    if relax_max_consecutive:
+                        print("連戦上限2が満たせないため、連戦上限3に緩和します")
+                        matches = _consecutive_optimize(matches, limit=3)
+            # 条件確認
+            if any(t.matches != TARGET_MATCHES_PER_TEAM for t in teams):
+                print(f"試行 {attempt}: 未達ペアあり -> スキップ")
+                continue
+            if len(matches) != expected_total_matches(len(teams), TARGET_MATCHES_PER_TEAM):
+                print(f"試行 {attempt}: 総試合数 {len(matches)} 不一致")
+                continue
+            if (not relax_max_consecutive) and _max_team_streak(matches) > max_consecutive:
+                print(
+                    f"試行 {attempt}: 連戦上限{max_consecutive}を満たせません (最大連戦={_max_team_streak(matches)}) -> スキップ"
+                )
+                continue
+            score = compute_diversity_score(teams)
+            if score > best_score:
+                best_score = score
+                best_matches = matches
+                best_teams = teams
+
+        if best_matches is not None:
+            break
+
     if best_matches is None:
         raise RuntimeError("全試行失敗: 条件を満たすスケジュールを構築できませんでした (グラフ+ヒューリスティック)")
+
+    print(f"最大連戦: {_max_team_streak(best_matches)}")
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     base_path = Path(output_file)
@@ -4667,6 +6598,9 @@ def generate_schedule(
         courts,
         start_time_hhmm=start_time,
         round_minutes=int(round_minutes),
+        excel_include_members=bool(excel_include_members),
+        excel_members_below=bool(excel_members_below),
+        excel_members_vlookup=bool(excel_members_vlookup),
     )
     html_output_path = final_output_path.with_suffix('.html')
     write_personal_schedule_html(
@@ -4678,10 +6612,28 @@ def generate_schedule(
         html_passcode=html_passcode or None,
         start_time_hhmm=start_time,
         round_minutes=int(round_minutes),
+        include_members=bool(include_members),
     )
+    if wall_html:
+        wall_rules = _parse_wall_team_color_rules(list(wall_team_color))
+        wall_output_path = final_output_path.with_name(f"{final_output_path.stem}_wall.html")
+        write_wall_schedule_html(
+            best_matches,
+            str(wall_output_path),
+            num_rounds=num_rounds,
+            courts=courts,
+            start_time_hhmm=start_time,
+            round_minutes=int(round_minutes),
+            courts_per_page=int(wall_courts_per_page),
+            team_color_rules=wall_rules,
+            auto_team_colors=bool(wall_auto_colors),
+            cell_background=bool(wall_cell_background),
+        )
     print(f"スケジュール出力: {final_output_path}")
     print("  含まれる主要シート: 対戦表 / 個人スケジュール表 / 対戦一覧短縮（チーム順/試合順）")
     print(f"HTML一式(対戦表+短縮+個人): {html_output_path}")
+    if wall_html:
+        print(f"壁貼り用HTML(コート別): {wall_output_path}")
     print(f"総試合数: {len(best_matches)} / 期待 { expected_total_matches(len(best_teams), TARGET_MATCHES_PER_TEAM) }")
     print(f"分散スコア(総対戦グループ種類合計): {best_score}")
     for level in ['A','B','C']:
@@ -4708,6 +6660,23 @@ def html_from_xlsx(
     start_time: str = typer.Option(DEFAULT_START_TIME_HHMM, help="開始時刻 (HH:MM) ※Excelに開始が無い場合の補助"),
     round_minutes: int = typer.Option(DEFAULT_ROUND_MINUTES, help="1ラウンドの時間（分） ※Excelに開始が無い場合の補助"),
     include_members: bool = typer.Option(False, help="HTMLに選手名（氏名）を含める。通常はOFF推奨"),
+    wall_html: bool = typer.Option(False, help="壁貼り用（コート別）HTMLも出力する（印刷前提・JS不要）"),
+    wall_courts_per_page: int = typer.Option(2, help="壁貼り用HTMLの1ページあたりコート数（1〜3推奨）。標準は2"),
+    wall_team_color: list[str] = typer.Option(
+        [],
+        "--wall-team-color",
+        help="壁貼り用のチーム色分け（複数可）。例: --wall-team-color '蛇口:red' --wall-team-color '上海:blue'",
+    ),
+    wall_auto_colors: bool = typer.Option(
+        True,
+        "--wall-auto-colors/--no-wall-auto-colors",
+        help="壁貼り用HTMLで、未指定チームも自動で色付けする（デフォルトON）",
+    ),
+    wall_cell_background: bool = typer.Option(
+        False,
+        "--wall-cell-background/--no-wall-cell-background",
+        help="壁貼り用HTMLのチームセル背景色を塗る（デフォルトOFF）。背景印刷がOFFになりがちなのでOFF推奨",
+    ),
 ):
     if round_minutes <= 0:
         raise typer.BadParameter("round_minutes は 1 以上を指定してください")
@@ -4721,11 +6690,16 @@ def html_from_xlsx(
         raise typer.BadParameter(f"入力ファイルが見つかりません: {input_file}")
     out_path = Path(output_file) if output_file else in_path.with_suffix(".html")
 
-    matches, teams, num_rounds, courts = load_schedule_from_xlsx(
-        str(in_path),
-        fallback_start_time_hhmm=start_time,
-        fallback_round_minutes=int(round_minutes),
-    )
+    try:
+        matches, teams, num_rounds, courts = load_schedule_from_xlsx(
+            str(in_path),
+            fallback_start_time_hhmm=start_time,
+            fallback_round_minutes=int(round_minutes),
+        )
+    except PermissionError:
+        raise typer.BadParameter(
+            f"Excelファイルを開いたままの可能性があります。Excelを閉じてから再実行してください: {input_file}"
+        )
     if num_rounds <= 0 or courts <= 0:
         raise RuntimeError("Excelからラウンド数/コート数を推定できませんでした")
 
@@ -4740,7 +6714,605 @@ def html_from_xlsx(
         round_minutes=int(round_minutes),
         include_members=bool(include_members),
     )
+    if wall_html:
+        wall_rules = _parse_wall_team_color_rules(list(wall_team_color))
+        wall_out_path = out_path.with_name(f"{out_path.stem}_wall.html")
+        write_wall_schedule_html(
+            matches,
+            str(wall_out_path),
+            num_rounds=num_rounds,
+            courts=courts,
+            start_time_hhmm=start_time,
+            round_minutes=int(round_minutes),
+            courts_per_page=int(wall_courts_per_page),
+            team_color_rules=wall_rules,
+            auto_team_colors=bool(wall_auto_colors),
+            cell_background=bool(wall_cell_background),
+        )
     print(f"HTML出力: {out_path}")
+    if wall_html:
+        print(f"壁貼り用HTML(コート別): {wall_out_path}")
+
+
+@app.command()
+def score_sheets_from_summary(
+    input_file: str = typer.Option(..., help="集計表（.xlsx/.xlsm）。'対戦一覧_短縮' シートを含むこと"),
+    sheet_name: str = typer.Option("対戦一覧_短縮", help="読み込む短縮対戦リストのシート名"),
+    output_file: str = typer.Option("", help="出力HTML。空なら input_file と同名で _score_sheets.html"),
+    per_page: int = typer.Option(8, help="A4 1枚あたりの枚数（面付け数）。標準は8（半分カット運用向け）"),
+    columns: int = typer.Option(2, help="面付けの列数。例: 2"),
+    include_members: bool = typer.Option(True, help="得点記入表に選手名（氏名）も入れる"),
+    round_minutes: int = typer.Option(DEFAULT_ROUND_MINUTES, help="終了時刻の計算に使う（分）"),
+):
+    """Export printable per-match score sheets from a summary workbook."""
+
+    if per_page <= 0:
+        raise typer.BadParameter("per_page は 1 以上を指定してください")
+    if columns <= 0:
+        raise typer.BadParameter("columns は 1 以上を指定してください")
+    if round_minutes <= 0:
+        raise typer.BadParameter("round_minutes は 1 以上を指定してください")
+
+    in_path = Path(input_file)
+    if not in_path.exists():
+        raise typer.BadParameter(f"入力ファイルが見つかりません: {input_file}")
+
+    out_path = Path(output_file) if output_file else in_path.with_name(f"{in_path.stem}_score_sheets.html")
+
+    try:
+        matches, teams, _num_rounds, _courts = load_schedule_from_short_list_xlsx(
+            str(in_path),
+            sheet_name=str(sheet_name),
+            fallback_start_time_hhmm=DEFAULT_START_TIME_HHMM,
+            fallback_round_minutes=int(round_minutes),
+        )
+    except PermissionError:
+        raise typer.BadParameter(
+            f"Excelファイルを開いたままの可能性があります。Excelを閉じてから再実行してください: {input_file}"
+        )
+
+    if not matches:
+        raise RuntimeError("短縮対戦リストから試合を読み取れませんでした（列名やシート名を確認してください）")
+
+    write_score_sheets_html(
+        matches,
+        teams,
+        str(out_path),
+        per_page=int(per_page),
+        columns=int(columns),
+        include_members=bool(include_members),
+        round_minutes=int(round_minutes),
+    )
+    print(f"得点記入表HTML出力: {out_path}")
+
+
+@app.command()
+def score_sheets_from_xlsx(
+    input_file: str = typer.Option(..., help="（手で編集した後の）スケジュールExcelファイル。'対戦表' と 'ペア一覧' を含むこと"),
+    output_file: str = typer.Option("", help="出力HTML。空なら input_file と同名で _score_sheets.html"),
+    per_page: int = typer.Option(8, help="A4 1枚あたりの枚数（面付け数）。標準は8（半分カット運用向け）"),
+    columns: int = typer.Option(2, help="面付けの列数。例: 2"),
+    include_members: bool = typer.Option(True, help="得点記入表に選手名（氏名）も入れる"),
+    start_time: str = typer.Option(DEFAULT_START_TIME_HHMM, help="開始時刻 (HH:MM) ※Excelに開始が無い場合の補助"),
+    round_minutes: int = typer.Option(DEFAULT_ROUND_MINUTES, help="終了時刻の計算に使う（分） ※Excelに開始が無い場合の補助"),
+):
+    """Export printable per-match score sheets from an exported schedule workbook."""
+
+    if per_page <= 0:
+        raise typer.BadParameter("per_page は 1 以上を指定してください")
+    if columns <= 0:
+        raise typer.BadParameter("columns は 1 以上を指定してください")
+    if round_minutes <= 0:
+        raise typer.BadParameter("round_minutes は 1 以上を指定してください")
+    try:
+        _parse_hhmm(start_time)
+    except ValueError as e:
+        raise typer.BadParameter(str(e))
+
+    in_path = Path(input_file)
+    if not in_path.exists():
+        raise typer.BadParameter(f"入力ファイルが見つかりません: {input_file}")
+
+    out_path = Path(output_file) if output_file else in_path.with_name(f"{in_path.stem}_score_sheets.html")
+
+    try:
+        matches, teams, _num_rounds, _courts = load_schedule_from_xlsx(
+            str(in_path),
+            fallback_start_time_hhmm=str(start_time),
+            fallback_round_minutes=int(round_minutes),
+        )
+    except PermissionError:
+        raise typer.BadParameter(
+            f"Excelファイルを開いたままの可能性があります。Excelを閉じてから再実行してください: {input_file}"
+        )
+    if not matches:
+        raise RuntimeError("Excelから試合を読み取れませんでした")
+
+    write_score_sheets_html(
+        matches,
+        teams,
+        str(out_path),
+        per_page=int(per_page),
+        columns=int(columns),
+        include_members=bool(include_members),
+        round_minutes=int(round_minutes),
+    )
+    print(f"得点記入表HTML出力: {out_path}")
+
+
+@app.command()
+def xlsx_from_xlsx(
+    input_file: str = typer.Option(..., help="（手で編集した後の）スケジュールExcelファイル。'対戦表' と 'ペア一覧' を含むこと"),
+    output_file: str = typer.Option("", help="出力Excelファイル。空なら input_file の末尾に _rebuilt を付ける"),
+    allow_court_gaps: bool = typer.Option(False, help="途中ラウンドの空きコートを許容するか（審判運用のため通常はOFF推奨）"),
+    start_time: str = typer.Option(DEFAULT_START_TIME_HHMM, help="開始時刻 (HH:MM) ※Excelに開始が無い場合の補助"),
+    round_minutes: int = typer.Option(DEFAULT_ROUND_MINUTES, help="1ラウンドの時間（分） ※Excelに開始が無い場合の補助"),
+    excel_include_members: bool = typer.Option(False, help="Excelの『対戦表』セルに選手名（氏名）を改行で表示する（手修正しやすい。配布する場合は注意）"),
+    excel_members_below: bool = typer.Option(False, help="Excelの『対戦表』を2行構成にする（上=ペア名、下=選手名）"),
+    excel_members_vlookup: bool = typer.Option(False, help="『選手名』行をペア一覧からVLOOKUPで自動表示する（ペア名セルをキー）。※Excelで開いて計算が必要"),
+):
+    """Rebuild an Excel workbook from a manually edited schedule.
+
+    Use this when you edited the exported Excel (matchups or member names) and want
+    the derived sheets (short lists / personal schedule) to be regenerated.
+    """
+    if round_minutes <= 0:
+        raise typer.BadParameter("round_minutes は 1 以上を指定してください")
+    try:
+        _parse_hhmm(start_time)
+    except ValueError as e:
+        raise typer.BadParameter(str(e))
+
+    in_path = Path(input_file)
+    if not in_path.exists():
+        raise typer.BadParameter(f"入力ファイルが見つかりません: {input_file}")
+
+    out_path = Path(output_file) if output_file else in_path.with_name(f"{in_path.stem}_rebuilt{in_path.suffix}")
+
+    try:
+        matches, teams, num_rounds, courts = load_schedule_from_xlsx(
+            str(in_path),
+            fallback_start_time_hhmm=start_time,
+            fallback_round_minutes=int(round_minutes),
+        )
+    except PermissionError:
+        raise typer.BadParameter(
+            f"Excelファイルを開いたままの可能性があります。Excelを閉じてから再実行してください: {input_file}"
+        )
+    if num_rounds <= 0 or courts <= 0:
+        raise RuntimeError("Excelからラウンド数/コート数を推定できませんでした")
+
+    write_to_excel_like_summary(
+        matches,
+        teams,
+        str(out_path),
+        bool(allow_court_gaps),
+        num_rounds,
+        courts,
+        start_time_hhmm=start_time,
+        round_minutes=int(round_minutes),
+        excel_include_members=bool(excel_include_members),
+        excel_members_below=bool(excel_members_below),
+        excel_members_vlookup=bool(excel_members_vlookup),
+    )
+    print(f"Excel出力: {out_path}")
+
+
+@app.command()
+def release_from_summary(
+    input_file: str = typer.Option(..., help="集計表（.xlsx/.xlsm）。'対戦一覧_短縮' シートを含むこと"),
+    sheet_name: str = typer.Option("対戦一覧_短縮", help="読み込む短縮対戦リストのシート名"),
+    output_file: str = typer.Option("", help="出力Excel。空なら input_file と同名で _from_summary.xlsx"),
+    html_passcode: str = typer.Option("", help="HTMLの簡易ロック用パスコード（注意: 完全な暗号化ではありません）"),
+    include_members_html: bool = typer.Option(True, help="HTML（個人/短縮）に選手名（氏名）を含める"),
+    wall_courts_per_page: int = typer.Option(2, help="壁貼り用HTMLの1ページあたりコート数（標準2）"),
+    wall_team_color: list[str] = typer.Option(
+        [],
+        "--wall-team-color",
+        help="壁貼り用のチーム色分け（複数可）。例: --wall-team-color '蛇口:red' --wall-team-color '上海:blue'",
+    ),
+    wall_auto_colors: bool = typer.Option(True, "--wall-auto-colors/--no-wall-auto-colors", help="未指定も自動で色付け"),
+    wall_cell_background: bool = typer.Option(
+        False,
+        "--wall-cell-background/--no-wall-cell-background",
+        help="壁貼りの背景色。標準OFF（背景印刷がOFFになりがちなので）",
+    ),
+    score_sheets_per_page: int = typer.Option(8, help="得点記入表の面付け数（標準8）"),
+    score_sheets_columns: int = typer.Option(2, help="得点記入表の列数（標準2）"),
+    score_sheets_include_members: bool = typer.Option(True, help="得点記入表に選手名（氏名）も入れる"),
+    round_minutes: int = typer.Option(DEFAULT_ROUND_MINUTES, help="終了時刻の計算に使う（分）"),
+    allow_court_gaps: bool = typer.Option(True, help="空きコートを許容する（集計表由来ではON推奨）"),
+    excel_include_members: bool = typer.Option(False, help="Excelの『対戦表』セルに選手名（氏名）を改行で表示する"),
+    excel_members_below: bool = typer.Option(False, help="Excelの『対戦表』を2行構成にする（上=ペア名、下=選手名）"),
+    excel_members_vlookup: bool = typer.Option(False, help="『選手名』行をペア一覧からVLOOKUPで自動表示する（要Excel再計算）"),
+    start_time: str = typer.Option(DEFAULT_START_TIME_HHMM, help="開始時刻 (HH:MM) ※時間列が欠けている場合の補助"),
+):
+    """集計表（短縮一覧）から、最終配布セットを一発で出力。
+
+    出力:
+      - Excel（_from_summary.xlsx）
+      - HTML一式（_from_summary.html）
+      - 壁貼りHTML（_from_summary_wall.html）
+      - 得点記入表（_from_summary_score_sheets.html）
+    """
+
+    if round_minutes <= 0:
+        raise typer.BadParameter("round_minutes は 1 以上を指定してください")
+    try:
+        _parse_hhmm(start_time)
+    except ValueError as e:
+        raise typer.BadParameter(str(e))
+
+    in_path = Path(input_file)
+    if not in_path.exists():
+        raise typer.BadParameter(f"入力ファイルが見つかりません: {input_file}")
+
+    out_xlsx = Path(output_file) if output_file else in_path.with_name(f"{in_path.stem}_from_summary.xlsx")
+
+    try:
+        matches, teams, num_rounds, courts = load_schedule_from_short_list_xlsx(
+            str(in_path),
+            sheet_name=str(sheet_name),
+            fallback_start_time_hhmm=start_time,
+            fallback_round_minutes=int(round_minutes),
+        )
+    except PermissionError:
+        raise typer.BadParameter(
+            f"Excelファイルを開いたままの可能性があります。Excelを閉じてから再実行してください: {input_file}"
+        )
+
+    if num_rounds <= 0 or courts <= 0 or not matches:
+        raise RuntimeError("短縮対戦リストから試合を読み取れませんでした（列名やシート名を確認してください）")
+
+    write_to_excel_like_summary(
+        matches,
+        teams,
+        str(out_xlsx),
+        bool(allow_court_gaps),
+        num_rounds,
+        courts,
+        start_time_hhmm=start_time,
+        round_minutes=int(round_minutes),
+        excel_include_members=bool(excel_include_members),
+        excel_members_below=bool(excel_members_below),
+        excel_members_vlookup=bool(excel_members_vlookup),
+        normalize_round_times=False,
+    )
+
+    out_html = out_xlsx.with_suffix(".html")
+    write_personal_schedule_html(
+        matches,
+        teams,
+        str(out_html),
+        num_rounds=num_rounds,
+        courts=courts,
+        html_passcode=html_passcode or None,
+        start_time_hhmm=start_time,
+        round_minutes=int(round_minutes),
+        include_members=bool(include_members_html),
+    )
+
+    wall_rules = _parse_wall_team_color_rules(list(wall_team_color))
+    out_wall = out_xlsx.with_name(f"{out_xlsx.stem}_wall.html")
+    write_wall_schedule_html(
+        matches,
+        str(out_wall),
+        num_rounds=num_rounds,
+        courts=courts,
+        start_time_hhmm=start_time,
+        round_minutes=int(round_minutes),
+        courts_per_page=int(wall_courts_per_page),
+        team_color_rules=wall_rules,
+        auto_team_colors=bool(wall_auto_colors),
+        cell_background=bool(wall_cell_background),
+    )
+
+    out_scores = out_xlsx.with_name(f"{out_xlsx.stem}_score_sheets.html")
+    write_score_sheets_html(
+        matches,
+        teams,
+        str(out_scores),
+        per_page=int(score_sheets_per_page),
+        columns=int(score_sheets_columns),
+        include_members=bool(score_sheets_include_members),
+        round_minutes=int(round_minutes),
+    )
+
+    print(f"Excel出力: {out_xlsx}")
+    print(f"HTML一式(対戦表+短縮+個人): {out_html}")
+    print(f"壁貼り用HTML(コート別): {out_wall}")
+    print(f"得点記入表HTML出力: {out_scores}")
+    print(f"読込元: {in_path} / シート: {sheet_name}")
+    print(f"総試合数: {len(matches)} / ラウンド数: {num_rounds} / コート数: {courts}")
+
+
+@app.command()
+def release_from_team_list(
+    input_file: str = typer.Option("チームリスト.xlsx", help="チーム一覧Excel"),
+    output_file: str = typer.Option("graph_schedule.xlsx", help="出力ファイル（ベース名）。タイムスタンプ付きで保存"),
+    num_rounds: int = 23,
+    courts: int = 15,
+    diversity_attempts: int = typer.Option(1, help="分散最大化の試行回数"),
+    graph_mode: bool = typer.Option(True, help="グラフ構築モードを使用 (必須条件安定化)"),
+    allow_court_gaps: bool = typer.Option(False, help="途中ラウンドの空きコートを許容するか（通常はOFF推奨）"),
+    max_consecutive: int = typer.Option(2, help="最大連戦数（2推奨）。満たせない場合は自動で3に緩和（2 or 3）"),
+    relax_max_consecutive: bool = typer.Option(
+        False,
+        "--relax-max-consecutive/--no-relax-max-consecutive",
+        help="連戦上限を満たせない場合に自動緩和する（max_consecutive=2 のとき 3 に緩和）。標準はOFF（探せるだけ探す）",
+    ),
+    matches_per_team: int = typer.Option(0, help="各ペアの試合数。0で自動"),
+    html_passcode: str = typer.Option("", help="HTMLの簡易ロック用パスコード（注意: 完全な暗号化ではありません）"),
+    include_members_html: bool = typer.Option(False, help="HTMLに選手名（氏名）を含める。通常はOFF推奨"),
+    wall_courts_per_page: int = typer.Option(2, help="壁貼り用HTMLの1ページあたりコート数（標準2）"),
+    wall_team_color: list[str] = typer.Option(
+        [],
+        "--wall-team-color",
+        help="壁貼り用のチーム色分け（複数可）。例: --wall-team-color '蛇口:red' --wall-team-color '上海:blue'",
+    ),
+    wall_auto_colors: bool = typer.Option(True, "--wall-auto-colors/--no-wall-auto-colors", help="未指定も自動で色付け"),
+    wall_cell_background: bool = typer.Option(
+        False,
+        "--wall-cell-background/--no-wall-cell-background",
+        help="壁貼りの背景色。標準OFF（背景印刷がOFFになりがちなので）",
+    ),
+    score_sheets_per_page: int = typer.Option(8, help="得点記入表の面付け数（標準8）"),
+    score_sheets_columns: int = typer.Option(2, help="得点記入表の列数（標準2）"),
+    score_sheets_include_members: bool = typer.Option(True, help="得点記入表に選手名（氏名）も入れる"),
+    excel_include_members: bool = typer.Option(False, help="Excelの『対戦表』セルに選手名（氏名）を改行で表示する"),
+    excel_members_below: bool = typer.Option(False, help="Excelの『対戦表』を2行構成にする（上=ペア名、下=選手名）"),
+    excel_members_vlookup: bool = typer.Option(False, help="『選手名』行をペア一覧からVLOOKUPで自動表示する（要Excel再計算）"),
+    start_time: str = typer.Option(DEFAULT_START_TIME_HHMM, help="開始時刻 (HH:MM)"),
+    round_minutes: int = typer.Option(DEFAULT_ROUND_MINUTES, help="1ラウンドの時間（分）"),
+):
+    """チームリストからスケジュール生成し、最終配布セットを一発で出力。"""
+
+    if not graph_mode:
+        raise typer.BadParameter("現在は graph_mode=True のみをサポートします")
+    if round_minutes <= 0:
+        raise typer.BadParameter("round_minutes は 1 以上を指定してください")
+    try:
+        _parse_hhmm(start_time)
+    except ValueError as e:
+        raise typer.BadParameter(str(e))
+    if max_consecutive not in (2, 3):
+        raise typer.BadParameter("max_consecutive は 2 または 3 を指定してください")
+    if matches_per_team < 0:
+        raise typer.BadParameter("matches_per_team は 0 以上を指定してください")
+
+    global TARGET_MATCHES_PER_TEAM
+
+    probe_teams = load_teams(input_file)
+    auto_mode = matches_per_team == 0
+    initial_target = (
+        compute_auto_matches_per_team(len(probe_teams), num_rounds, courts) if auto_mode else matches_per_team
+    )
+
+    capacity = num_rounds * courts
+
+    best_matches: List[Match] | None = None
+    best_teams: List[Team] | None = None
+    best_score: int = -1
+    best_streak_seen: int | None = None
+    tried_targets: Set[int] = set()
+    target_candidates = [initial_target] if not auto_mode else list(range(initial_target, 0, -1))
+
+    for target in target_candidates:
+        if (len(probe_teams) % 2 == 1) and (target % 2 == 1):
+            target -= 1
+        if target <= 0 or target in tried_targets:
+            continue
+        tried_targets.add(target)
+
+        expected_matches_total = expected_total_matches(len(probe_teams), target)
+        if (len(probe_teams) * target) % 2 != 0:
+            if auto_mode:
+                continue
+            raise typer.BadParameter(
+                f"不正な組合せ: ペア数={len(probe_teams)} と 目標={target} では総試合数が整数になりません（ペア数が奇数の時は試合数は偶数が必要）"
+            )
+        if expected_matches_total > capacity:
+            if auto_mode:
+                continue
+            raise typer.BadParameter(
+                f"容量不足: courts*num_rounds={capacity} 試合枠に対し、必要試合数={expected_matches_total}（ペア数={len(probe_teams)}, 目標={target}試合/ペア）"
+            )
+
+        TARGET_MATCHES_PER_TEAM = target
+        if target != initial_target:
+            print(f"自動調整: 目標試合数/ペアを {target} に下げて再試行します")
+        print(
+            f"目標試合数/ペア: {TARGET_MATCHES_PER_TEAM}（自動={auto_mode}） / 必要試合数 {expected_matches_total} / 容量 {capacity}"
+        )
+
+        best_matches = None
+        best_teams = None
+        best_score = -1
+        best_streak_seen = None
+
+        for attempt in range(diversity_attempts):
+            teams = load_teams(input_file)
+            graph_ok = False
+            try:
+                matches = schedule_matches_graph(teams, num_rounds, courts, seed=attempt)
+                refresh_team_stats(teams, matches)
+                if all(t.matches == TARGET_MATCHES_PER_TEAM for t in teams) and len(matches) == expected_total_matches(
+                    len(teams), TARGET_MATCHES_PER_TEAM
+                ):
+                    graph_ok = True
+            except Exception as e:
+                print(f"グラフ試行 {attempt} 失敗: {e}")
+            if not graph_ok:
+                print(f"フォールバックヒューリスティック使用 (試行 {attempt})")
+                teams = load_teams(input_file)
+                matches = schedule_matches_heuristic(teams, num_rounds, courts, seed=attempt)
+                refresh_team_stats(teams, matches)
+
+            if all(t.matches == TARGET_MATCHES_PER_TEAM for t in teams) and len(matches) == expected_total_matches(
+                len(teams), TARGET_MATCHES_PER_TEAM
+            ):
+                matches = rebalance_vertical_distribution(matches, teams, num_rounds, courts)
+                matches = enforce_segments_and_quotas(matches, teams, num_rounds, courts)
+                matches = balanced_round_reassignment(matches, num_rounds, courts)
+                matches = boost_group_diversity(matches, teams)
+                matches = reduce_back_to_back(matches, num_rounds, courts)
+                matches = tighten_level_bands(matches, num_rounds, courts)
+                collisions = detect_collisions(matches)
+                if collisions:
+                    print(f"衝突スロット数: {len(collisions)} → 修復試行")
+                    matches = repair_collisions(matches, num_rounds, courts)
+                    after = detect_collisions(matches)
+                    if after:
+                        print(f"修復後も残る衝突: {len(after)}")
+                matches = normalize_round_capacity(matches, num_rounds, courts)
+                matches = ensure_round_one_full(matches, num_rounds, courts)
+                if not allow_court_gaps:
+                    matches = eliminate_mid_session_court_gaps(matches, num_rounds, courts)
+                matches = compact_court_usage(matches, num_rounds, courts)
+
+                def _max_team_streak(ms: List[Match]) -> int:
+                    rounds_map: Dict[str, List[int]] = defaultdict(list)
+                    for m in ms:
+                        rounds_map[m.team1.name].append(m.round_num)
+                        rounds_map[m.team2.name].append(m.round_num)
+                    best = 0
+                    for rs in rounds_map.values():
+                        if not rs:
+                            continue
+                        sr = sorted(rs)
+                        cur = 1
+                        mx = 1
+                        for i in range(1, len(sr)):
+                            if sr[i] == sr[i - 1] + 1:
+                                cur += 1
+                                mx = max(mx, cur)
+                            else:
+                                cur = 1
+                        best = max(best, mx)
+                    return best
+
+                def _consecutive_optimize(ms: List[Match], limit: int) -> List[Match]:
+                    for _ in range(3):
+                        if _max_team_streak(ms) <= limit:
+                            break
+                        ms = reduce_max_consecutive_streak(ms, num_rounds, courts, max_consecutive=limit)
+                        ms = normalize_round_capacity(ms, num_rounds, courts)
+                        ms = ensure_round_one_full(ms, num_rounds, courts)
+                        if not allow_court_gaps:
+                            ms = eliminate_mid_session_court_gaps(ms, num_rounds, courts)
+                        ms = compact_court_usage(ms, num_rounds, courts)
+                    return ms
+
+                matches = _consecutive_optimize(matches, limit=max_consecutive)
+                if max_consecutive == 2 and _max_team_streak(matches) > 2:
+                    if relax_max_consecutive:
+                        print("連戦上限2が満たせないため、連戦上限3に緩和します")
+                        matches = _consecutive_optimize(matches, limit=3)
+
+            if any(t.matches != TARGET_MATCHES_PER_TEAM for t in teams):
+                print(f"試行 {attempt}: 未達ペアあり -> スキップ")
+                continue
+            if len(matches) != expected_total_matches(len(teams), TARGET_MATCHES_PER_TEAM):
+                print(f"試行 {attempt}: 総試合数 {len(matches)} 不一致")
+                continue
+
+            streak = _max_team_streak(matches)
+            if best_streak_seen is None or streak < best_streak_seen:
+                best_streak_seen = streak
+
+            if (not relax_max_consecutive) and streak > max_consecutive:
+                # Strict mode: keep searching for a schedule that truly satisfies the limit.
+                continue
+
+            score = compute_diversity_score(teams)
+            if score > best_score:
+                best_score = score
+                best_matches = matches
+                best_teams = teams
+
+        if best_matches is not None:
+            break
+
+    if best_matches is None or best_teams is None:
+        hint = ""
+        if (not relax_max_consecutive) and max_consecutive == 2:
+            hint = f"（補足: この探索では最大連戦の最良値={best_streak_seen}。diversity_attempts を増やして再試行してください）"
+        raise RuntimeError(
+            "全試行失敗: 条件を満たすスケジュールを構築できませんでした (グラフ+ヒューリスティック)" + hint
+        )
+
+    print(f"最大連戦: {_max_team_streak(best_matches)}")
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    base_path = Path(output_file)
+    stamped_name = (
+        f"{base_path.stem}_{timestamp}{base_path.suffix}" if base_path.suffix else f"{base_path.name}_{timestamp}"
+    )
+    out_xlsx = base_path.with_name(stamped_name)
+
+    refresh_team_stats(best_teams, best_matches)
+    apply_round_times(best_matches, start_time_hhmm=start_time, round_minutes=int(round_minutes))
+
+    write_to_excel_like_summary(
+        best_matches,
+        best_teams,
+        str(out_xlsx),
+        allow_court_gaps,
+        num_rounds,
+        courts,
+        start_time_hhmm=start_time,
+        round_minutes=int(round_minutes),
+        excel_include_members=bool(excel_include_members),
+        excel_members_below=bool(excel_members_below),
+        excel_members_vlookup=bool(excel_members_vlookup),
+    )
+
+    out_html = out_xlsx.with_suffix(".html")
+    write_personal_schedule_html(
+        best_matches,
+        best_teams,
+        str(out_html),
+        num_rounds=num_rounds,
+        courts=courts,
+        html_passcode=html_passcode or None,
+        start_time_hhmm=start_time,
+        round_minutes=int(round_minutes),
+        include_members=bool(include_members_html),
+    )
+
+    wall_rules = _parse_wall_team_color_rules(list(wall_team_color))
+    out_wall = out_xlsx.with_name(f"{out_xlsx.stem}_wall.html")
+    write_wall_schedule_html(
+        best_matches,
+        str(out_wall),
+        num_rounds=num_rounds,
+        courts=courts,
+        start_time_hhmm=start_time,
+        round_minutes=int(round_minutes),
+        courts_per_page=int(wall_courts_per_page),
+        team_color_rules=wall_rules,
+        auto_team_colors=bool(wall_auto_colors),
+        cell_background=bool(wall_cell_background),
+    )
+
+    out_scores = out_xlsx.with_name(f"{out_xlsx.stem}_score_sheets.html")
+    write_score_sheets_html(
+        best_matches,
+        best_teams,
+        str(out_scores),
+        per_page=int(score_sheets_per_page),
+        columns=int(score_sheets_columns),
+        include_members=bool(score_sheets_include_members),
+        round_minutes=int(round_minutes),
+    )
+
+    print(f"スケジュール出力: {out_xlsx}")
+    print("  含まれる主要シート: 対戦表 / 個人スケジュール表 / 対戦一覧短縮（チーム順/試合順）")
+    print(f"HTML一式(対戦表+短縮+個人): {out_html}")
+    print(f"壁貼り用HTML(コート別): {out_wall}")
+    print(f"得点記入表HTML出力: {out_scores}")
+    print(f"総試合数: {len(best_matches)} / 期待 { expected_total_matches(len(best_teams), TARGET_MATCHES_PER_TEAM) }")
+    print(f"分散スコア(総対戦グループ種類合計): {best_score}")
 
 if __name__ == "__main__":
     app()

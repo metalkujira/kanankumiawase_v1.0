@@ -58,7 +58,7 @@ def main() -> int:
     wb_new = openpyxl.Workbook()
     ws = wb_new.active
     ws.title = "チームリスト"
-    ws.append(["ペア名", "氏名", "レベル", "グループ"])
+    ws.append(["ペア名", "氏名", "優先対戦", "優先対戦相手"])
 
     for _, row in valid_teams.iterrows():
         name = row.get("ペア名 ↓値ばりで記入")
@@ -68,10 +68,7 @@ def main() -> int:
         name = str(name)
         members = "" if pd.isna(members) else str(members)
 
-        levels = [c for c in name if c in "ABC"]
-        level = levels[0] if levels else ""
-        group = name.rstrip("0123456789")
-        ws.append([name, members, level, group])
+        ws.append([name, members, "", ""])
 
     wb_new.save(str(output_path))
     print(f"Created: {output_path}")

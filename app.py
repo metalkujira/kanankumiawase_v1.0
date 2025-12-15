@@ -112,6 +112,14 @@ with st.sidebar:
     else:
         st.info("個人情報対策: 選手名（氏名）を表示しません（ペア名のみ）。")
     regen_passcode = st.text_input("再生成HTMLのパスコード（任意）", value="", type="password", key="regen_html_pass")
+
+    st.markdown("#### 追加出力（任意）")
+    regen_wall_html = st.checkbox("壁貼り用HTMLも出力", value=True)
+    regen_wall_cpp = st.selectbox("壁貼り用: 1ページあたりコート数", options=[1, 2, 3], index=2)
+    regen_score_sheets = st.checkbox("得点記入表HTMLも出力", value=True)
+    regen_score_per_page = st.number_input("得点記入表: 1枚あたりの枚数", min_value=1, max_value=20, value=10, step=1)
+    regen_score_columns = st.number_input("得点記入表: 列数", min_value=1, max_value=4, value=2, step=1)
+
     regen = st.button("HTMLを再生成", use_container_width=True)
 
 
@@ -130,6 +138,23 @@ def _set_regen_html(*, html_name: str, html_bytes: bytes, include_members: bool)
     st.session_state.regen_html_name = html_name
     st.session_state.regen_html_bytes = html_bytes
     st.session_state.regen_include_members = include_members
+
+
+def _set_regen_outputs(
+    *,
+    html_name: str,
+    html_bytes: bytes,
+    include_members: bool,
+    wall_name: str | None = None,
+    wall_bytes: bytes | None = None,
+    score_name: str | None = None,
+    score_bytes: bytes | None = None,
+) -> None:
+    _set_regen_html(html_name=html_name, html_bytes=html_bytes, include_members=include_members)
+    st.session_state.regen_wall_name = wall_name
+    st.session_state.regen_wall_bytes = wall_bytes
+    st.session_state.regen_score_name = score_name
+    st.session_state.regen_score_bytes = score_bytes
 
 
 if run:
@@ -248,7 +273,47 @@ if 'regen' in locals() and regen:
                 )
                 html_bytes = _read_bytes(out_path)
 
-            _set_regen_html(html_name=out_name, html_bytes=html_bytes, include_members=bool(regen_include_members))
+                wall_name = None
+                wall_bytes = None
+                if regen_wall_html:
+                    wall_name = out_path.with_name(f"{out_path.stem}_wall.html").name
+                    wall_path = tmp_dir / wall_name
+                    scheduler.write_wall_schedule_html(
+                        matches,
+                        str(wall_path),
+                        num_rounds=int(inferred_rounds),
+                        courts=int(inferred_courts),
+                        start_time_hhmm=str(start_time),
+                        round_minutes=int(round_minutes),
+                        courts_per_page=int(regen_wall_cpp),
+                    )
+                    wall_bytes = _read_bytes(wall_path)
+
+                score_name = None
+                score_bytes = None
+                if regen_score_sheets:
+                    score_name = out_path.with_name(f"{out_path.stem}_score_sheets.html").name
+                    score_path = tmp_dir / score_name
+                    scheduler.write_score_sheets_html(
+                        matches,
+                        teams,
+                        str(score_path),
+                        per_page=int(regen_score_per_page),
+                        columns=int(regen_score_columns),
+                        include_members=bool(regen_include_members),
+                        round_minutes=int(round_minutes),
+                    )
+                    score_bytes = _read_bytes(score_path)
+
+            _set_regen_outputs(
+                html_name=out_name,
+                html_bytes=html_bytes,
+                include_members=bool(regen_include_members),
+                wall_name=wall_name,
+                wall_bytes=wall_bytes,
+                score_name=score_name,
+                score_bytes=score_bytes,
+            )
             status.update(label="再生成完了", state="complete", expanded=False)
             if regen_include_members:
                 st.success("HTMLを再生成しました（選手名あり）。下のダウンロードから取得できます。")
@@ -299,3 +364,21 @@ if st.session_state.get("regen_html_bytes") and st.session_state.get("regen_html
         mime="text/html",
         use_container_width=True,
     )
+
+    if st.session_state.get("regen_wall_bytes") and st.session_state.get("regen_wall_name"):
+        st.download_button(
+            "壁貼り用HTMLをダウンロード",
+            data=st.session_state.regen_wall_bytes,
+            file_name=st.session_state.regen_wall_name,
+            mime="text/html",
+            use_container_width=True,
+        )
+
+    if st.session_state.get("regen_score_bytes") and st.session_state.get("regen_score_name"):
+        st.download_button(
+            "得点記入表HTMLをダウンロード",
+            data=st.session_state.regen_score_bytes,
+            file_name=st.session_state.regen_score_name,
+            mime="text/html",
+            use_container_width=True,
+        )

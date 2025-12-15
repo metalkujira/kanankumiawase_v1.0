@@ -1,0 +1,9 @@
+[browser]
+gatherUsageStats = false
+
+[server]
+headless = true
+port = 8501
+
+[client]
+toolbarMode = "minimal"
