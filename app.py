@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import io
 import tempfile
+import zipfile
 from pathlib import Path
 
 import streamlit as st
@@ -112,6 +114,27 @@ with st.sidebar:
     else:
         st.caption("注記: 名前なし（ペア名のみ）で生成します。公開配布向きです。")
 
+    st.markdown("#### 追加出力（任意）")
+    gen_wall_html = st.checkbox("壁貼り用HTMLも出力", value=True, key="gen_wall_html")
+    gen_wall_cpp = st.selectbox("壁貼り用: 1ページあたりコート数", options=[1, 2, 3], index=2, key="gen_wall_cpp")
+    gen_score_sheets = st.checkbox("得点記入表HTMLも出力", value=True, key="gen_score_sheets")
+    gen_score_per_page = st.number_input(
+        "得点記入表: 1枚あたりの枚数",
+        min_value=1,
+        max_value=20,
+        value=10,
+        step=1,
+        key="gen_score_per_page",
+    )
+    gen_score_columns = st.number_input(
+        "得点記入表: 列数",
+        min_value=1,
+        max_value=4,
+        value=2,
+        step=1,
+        key="gen_score_columns",
+    )
+
     run = st.button("生成", type="primary", use_container_width=True)
 
     st.divider()
@@ -145,11 +168,45 @@ def _read_bytes(p: Path) -> bytes:
     return p.read_bytes()
 
 
+def _build_zip_bytes(*, files: dict[str, bytes], zip_comment: str | None = None) -> bytes:
+    """Build a ZIP archive in memory.
+
+    `files` maps file name -> file bytes.
+    """
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        if zip_comment:
+            zf.comment = zip_comment.encode("utf-8", errors="ignore")
+        for name, data in files.items():
+            if not name or data is None:
+                continue
+            zf.writestr(name, data)
+    return buf.getvalue()
+
+
 def _set_last_outputs(*, excel_name: str, excel_bytes: bytes, html_name: str | None, html_bytes: bytes | None) -> None:
     st.session_state.last_excel_name = excel_name
     st.session_state.last_excel_bytes = excel_bytes
     st.session_state.last_html_name = html_name
     st.session_state.last_html_bytes = html_bytes
+
+
+def _set_last_outputs_full(
+    *,
+    excel_name: str,
+    excel_bytes: bytes,
+    html_name: str | None,
+    html_bytes: bytes | None,
+    wall_name: str | None = None,
+    wall_bytes: bytes | None = None,
+    score_name: str | None = None,
+    score_bytes: bytes | None = None,
+) -> None:
+    _set_last_outputs(excel_name=excel_name, excel_bytes=excel_bytes, html_name=html_name, html_bytes=html_bytes)
+    st.session_state.last_wall_name = wall_name
+    st.session_state.last_wall_bytes = wall_bytes
+    st.session_state.last_score_name = score_name
+    st.session_state.last_score_bytes = score_bytes
 
 
 def _set_regen_html(*, html_name: str, html_bytes: bytes, include_members: bool) -> None:
@@ -233,14 +290,50 @@ if run:
                     include_members=bool(html_include_members),
                 )
 
+                wall_name = None
+                wall_bytes = None
+                if bool(gen_wall_html):
+                    wall_path = safe_html_path.with_name(f"{safe_html_path.stem}_wall.html")
+                    scheduler.write_wall_schedule_html(
+                        matches,
+                        str(wall_path),
+                        num_rounds=int(inferred_rounds),
+                        courts=int(inferred_courts),
+                        start_time_hhmm=str(start_time),
+                        round_minutes=int(round_minutes),
+                        courts_per_page=int(gen_wall_cpp),
+                    )
+                    wall_name = wall_path.name
+                    wall_bytes = _read_bytes(wall_path)
+
+                score_name = None
+                score_bytes = None
+                if bool(gen_score_sheets):
+                    score_path = safe_html_path.with_name(f"{safe_html_path.stem}_score_sheets.html")
+                    scheduler.write_score_sheets_html(
+                        matches,
+                        teams,
+                        str(score_path),
+                        per_page=int(gen_score_per_page),
+                        columns=int(gen_score_columns),
+                        include_members=bool(html_include_members),
+                        round_minutes=int(round_minutes),
+                    )
+                    score_name = score_path.name
+                    score_bytes = _read_bytes(score_path)
+
                 excel_bytes = _read_bytes(xlsx_path)
                 html_bytes = _read_bytes(safe_html_path)
 
-            _set_last_outputs(
+            _set_last_outputs_full(
                 excel_name=xlsx_path.name,
                 excel_bytes=excel_bytes,
                 html_name=safe_html_path.name,
                 html_bytes=html_bytes,
+                wall_name=wall_name,
+                wall_bytes=wall_bytes,
+                score_name=score_name,
+                score_bytes=score_bytes,
             )
 
             status.update(label="生成完了", state="complete", expanded=False)
@@ -345,6 +438,29 @@ if 'regen' in locals() and regen:
 if "last_excel_bytes" in st.session_state:
     st.markdown("### ダウンロード")
     st.caption("生成結果はサーバーにファイルとしては残さず、このブラウザのセッション内メモリで保持します（再読み込みすると消えます）。")
+
+    # One-click ZIP bundle for convenience.
+    bundle_files: dict[str, bytes] = {}
+    if st.session_state.get("last_excel_bytes") and st.session_state.get("last_excel_name"):
+        bundle_files[str(st.session_state.last_excel_name)] = st.session_state.last_excel_bytes
+    if st.session_state.get("last_html_bytes") and st.session_state.get("last_html_name"):
+        bundle_files[str(st.session_state.last_html_name)] = st.session_state.last_html_bytes
+    if st.session_state.get("last_wall_bytes") and st.session_state.get("last_wall_name"):
+        bundle_files[str(st.session_state.last_wall_name)] = st.session_state.last_wall_bytes
+    if st.session_state.get("last_score_bytes") and st.session_state.get("last_score_name"):
+        bundle_files[str(st.session_state.last_score_name)] = st.session_state.last_score_bytes
+
+    if bundle_files:
+        base_name = str(st.session_state.get("last_excel_name") or st.session_state.get("last_html_name") or "bundle")
+        zip_name = Path(base_name).with_suffix(".zip").name
+        st.download_button(
+            "全部ZIPでダウンロード",
+            data=_build_zip_bytes(files=bundle_files, zip_comment="Badminton Scheduler bundle"),
+            file_name=zip_name,
+            mime="application/zip",
+            use_container_width=True,
+        )
+
     col1, col2 = st.columns(2)
     with col1:
         st.download_button(
@@ -366,6 +482,31 @@ if "last_excel_bytes" in st.session_state:
         else:
             st.info("HTML出力はありませんでした")
 
+    col3, col4 = st.columns(2)
+    with col3:
+        if st.session_state.get("last_wall_bytes") and st.session_state.get("last_wall_name"):
+            st.download_button(
+                "壁貼り用HTMLをダウンロード",
+                data=st.session_state.last_wall_bytes,
+                file_name=st.session_state.last_wall_name,
+                mime="text/html",
+                use_container_width=True,
+            )
+        else:
+            st.caption("壁貼り用HTML: 未出力")
+
+    with col4:
+        if st.session_state.get("last_score_bytes") and st.session_state.get("last_score_name"):
+            st.download_button(
+                "得点記入表HTMLをダウンロード",
+                data=st.session_state.last_score_bytes,
+                file_name=st.session_state.last_score_name,
+                mime="text/html",
+                use_container_width=True,
+            )
+        else:
+            st.caption("得点記入表: 未出力")
+
     st.divider()
     st.caption("注意: HTMLの簡易ロックは暗号化ではありません。配布先は限定してください。")
 
@@ -382,6 +523,22 @@ if st.session_state.get("regen_html_bytes") and st.session_state.get("regen_html
         mime="text/html",
         use_container_width=True,
     )
+
+    regen_bundle_files: dict[str, bytes] = {}
+    regen_bundle_files[str(st.session_state.regen_html_name)] = st.session_state.regen_html_bytes
+    if st.session_state.get("regen_wall_bytes") and st.session_state.get("regen_wall_name"):
+        regen_bundle_files[str(st.session_state.regen_wall_name)] = st.session_state.regen_wall_bytes
+    if st.session_state.get("regen_score_bytes") and st.session_state.get("regen_score_name"):
+        regen_bundle_files[str(st.session_state.regen_score_name)] = st.session_state.regen_score_bytes
+    if regen_bundle_files:
+        zip_name = Path(str(st.session_state.regen_html_name)).with_suffix(".zip").name
+        st.download_button(
+            "再生成を全部ZIPでダウンロード",
+            data=_build_zip_bytes(files=regen_bundle_files, zip_comment="Badminton Scheduler regen bundle"),
+            file_name=zip_name,
+            mime="application/zip",
+            use_container_width=True,
+        )
 
     if st.session_state.get("regen_wall_bytes") and st.session_state.get("regen_wall_name"):
         st.download_button(

@@ -614,6 +614,7 @@ def pack_rounds(edges: List[Tuple[Team, Team]], num_rounds: int, courts: int,
     # 各ラウンドで使用済みチーム集合
     used_in_round: Dict[int, Set[str]] = {r: set() for r in range(1, num_rounds+1)}
     last_round_played: Dict[str, int] = defaultdict(int)
+    played_rounds: Dict[str, Set[int]] = defaultdict(set)
 
     if shuffle_seed is None:
         edges_sorted = sorted(edges, key=lambda e: (e[0].level, e[0].name, e[1].name))
@@ -623,17 +624,40 @@ def pack_rounds(edges: List[Tuple[Team, Team]], num_rounds: int, courts: int,
 
     for (t1, t2) in edges_sorted:
         placed = False
-        candidate_rounds: List[int] = []
-        safe_rounds: List[int] = []
-        for r in range(1, num_rounds+1):
+
+        def _penalty_for(team_name: str, round_num: int) -> Tuple[int, int]:
+            """Return (triple_flag, b2b_flag) if team plays at round_num."""
+
+            rs = played_rounds.get(team_name, set())
+            b2b = 1 if (round_num - 1) in rs else 0
+            triple = 1 if b2b and (round_num - 2) in rs else 0
+            return triple, b2b
+
+        candidates: List[Tuple[Tuple[int, int, int, int, int], int]] = []
+        for r in range(1, num_rounds + 1):
             if len(round_matches_raw[r]) >= courts:
                 continue  # コート満杯
             if t1.name in used_in_round[r] or t2.name in used_in_round[r]:
                 continue  # 同ラウンド重複不可
-            candidate_rounds.append(r)
-            if last_round_played[t1.name] != r - 1 and last_round_played[t2.name] != r - 1:
-                safe_rounds.append(r)
-        for r in (safe_rounds or candidate_rounds):
+
+            p1 = _penalty_for(t1.name, r)
+            p2 = _penalty_for(t2.name, r)
+            triple = max(p1[0], p2[0])
+            b2b = max(p1[1], p2[1])
+            load = len(round_matches_raw[r])
+            # Prefer: avoid triples > avoid back-to-backs > spread load > earlier rounds.
+            key = (triple, b2b, load, r)
+            # As a small tie-breaker, prefer not placing immediately after last round played.
+            key = (key[0], key[1], key[2], key[3], abs(r - max(last_round_played[t1.name], last_round_played[t2.name])))
+            candidates.append((key, r))
+
+        if candidates:
+            candidates.sort(key=lambda x: x[0])
+            ordered_rounds = [r for _, r in candidates]
+        else:
+            ordered_rounds = []
+
+        for r in ordered_rounds:
             start_time = start_base + timedelta(minutes=13*(r-1))
             m = Match(r, 0, t1, t2, start_time)
             round_matches_raw[r].append(m)
@@ -647,6 +671,8 @@ def pack_rounds(edges: List[Tuple[Team, Team]], num_rounds: int, courts: int,
             t2.groups_faced.add(t1.group)
             last_round_played[t1.name] = r
             last_round_played[t2.name] = r
+            played_rounds[t1.name].add(r)
+            played_rounds[t2.name].add(r)
             t1.last_round = max(t1.last_round, r)
             t2.last_round = max(t2.last_round, r)
             placed = True
@@ -2008,6 +2034,50 @@ def compute_diversity_score(teams: List[Team]) -> int:
     return sum(len(t.groups_faced) for t in teams)
 
 
+def _max_team_streak(matches: List[Match]) -> int:
+    rounds_map: Dict[str, List[int]] = defaultdict(list)
+    for m in matches:
+        rounds_map[m.team1.name].append(int(m.round_num))
+        rounds_map[m.team2.name].append(int(m.round_num))
+    best = 0
+    for rs in rounds_map.values():
+        if not rs:
+            continue
+        sr = sorted(rs)
+        cur = 1
+        mx = 1
+        for i in range(1, len(sr)):
+            if sr[i] == sr[i - 1] + 1:
+                cur += 1
+                mx = max(mx, cur)
+            else:
+                cur = 1
+        best = max(best, mx)
+    return best
+
+
+def _count_consecutive_pairs(matches: List[Match]) -> int:
+    """Count adjacent-round occurrences (1 gap) across all teams.
+
+    This is used as a soft objective: fewer back-to-backs is better,
+    while still keeping matches-per-team fixed.
+    """
+
+    rounds_map: Dict[str, List[int]] = defaultdict(list)
+    for m in matches:
+        rounds_map[m.team1.name].append(int(m.round_num))
+        rounds_map[m.team2.name].append(int(m.round_num))
+    total = 0
+    for rs in rounds_map.values():
+        if not rs:
+            continue
+        sr = sorted(rs)
+        for i in range(1, len(sr)):
+            if sr[i] == sr[i - 1] + 1:
+                total += 1
+    return total
+
+
 def refresh_team_stats(teams: List[Team], matches: List[Match]) -> None:
     for t in teams:
         t.matches = 0
@@ -2918,7 +2988,107 @@ def reduce_max_consecutive_streak(matches: List[Match], num_rounds: int, courts:
             candidates.append((after, load, dist, r))
 
         if not candidates:
-            return False
+            # If there is no spare slot that works, try a round-swap.
+
+            def rounds_if_swapped(team_name: str, from_round: int, to_round: int) -> List[int]:
+                rs = list(team_rounds_map.get(team_name, []))
+                rs = [r for r in rs if r != from_round]
+                rs.append(to_round)
+                rs.sort()
+                return rs
+
+            def total_violation_for(team_names: tuple[str, ...], swaps: dict[str, tuple[int, int]]) -> int:
+                total = 0
+                for name in team_names:
+                    if name in swaps:
+                        from_r, to_r = swaps[name]
+                        total += violation(rounds_if_swapped(name, from_r, to_r))
+                    else:
+                        total += violation(team_rounds_map.get(name, []))
+                return total
+
+            origin_names_wo = set(round_names.get(origin_round, set()))
+            origin_names_wo.discard(t1)
+            origin_names_wo.discard(t2)
+
+            best_swap: tuple[int, int, int, Match] | None = None
+            for r in range(1, num_rounds + 1):
+                if r == origin_round:
+                    continue
+                names_r = round_names.setdefault(r, set())
+                if t1 in names_r or t2 in names_r:
+                    continue
+
+                for other in list(round_matches.get(r, [])):
+                    u1 = other.team1.name
+                    u2 = other.team2.name
+                    # After removing `match` from origin_round, `u1/u2` must be free there.
+                    if u1 in origin_names_wo or u2 in origin_names_wo:
+                        continue
+                    # `other` cannot include t1/t2 due to the round-name check above.
+
+                    before_all = (
+                        violation(team_rounds_map.get(t1, []))
+                        + violation(team_rounds_map.get(t2, []))
+                        + violation(team_rounds_map.get(u1, []))
+                        + violation(team_rounds_map.get(u2, []))
+                    )
+
+                    swaps = {
+                        t1: (origin_round, r),
+                        t2: (origin_round, r),
+                        u1: (r, origin_round),
+                        u2: (r, origin_round),
+                    }
+                    after_all = total_violation_for((t1, t2, u1, u2), swaps)
+                    if after_all > before_all:
+                        continue
+
+                    dist = abs(r - origin_round)
+                    # Prefer lower violation, closer swap, then stable ordering.
+                    cand = (after_all, dist, other.court, other)
+                    if best_swap is None or cand < best_swap:
+                        best_swap = cand
+
+            if best_swap is None:
+                return False
+
+            other = best_swap[3]
+            target_round = other.round_num
+            origin_court = match.court
+            target_court = other.court
+
+            # Update round bookkeeping: remove from old rounds.
+            if match in round_matches.get(origin_round, []):
+                round_matches[origin_round].remove(match)
+            if other in round_matches.get(target_round, []):
+                round_matches[target_round].remove(other)
+
+            round_names.setdefault(origin_round, set()).discard(t1)
+            round_names[origin_round].discard(t2)
+            round_names.setdefault(target_round, set()).discard(other.team1.name)
+            round_names[target_round].discard(other.team2.name)
+
+            round_courts.setdefault(origin_round, set()).discard(origin_court)
+            round_courts.setdefault(target_round, set()).discard(target_court)
+
+            # Apply swap (reuse the freed courts so court-uniqueness holds).
+            match.round_num = target_round
+            match.court = target_court
+            other.round_num = origin_round
+            other.court = origin_court
+
+            # Add back to new rounds.
+            round_matches[target_round].append(match)
+            round_courts[target_round].add(match.court)
+            round_names[target_round].add(t1)
+            round_names[target_round].add(t2)
+
+            round_matches[origin_round].append(other)
+            round_courts[origin_round].add(other.court)
+            round_names[origin_round].add(other.team1.name)
+            round_names[origin_round].add(other.team2.name)
+            return True
         candidates.sort(key=lambda x: (x[0], x[1], x[2], x[3]))
         target_round = candidates[0][3]
         new_court = pick_court(target_round)
@@ -3831,6 +4001,43 @@ def write_to_excel_like_summary(
     # Sheet 7: チェックリスト（絶対条件 + 分散の参考値）
     ws7 = wb.create_sheet("チェックリスト")
     ws7.append(["項目", "判定", "詳細"])
+
+    # Quick visibility summary: max streak and whether any 3-in-a-row exists.
+    all_team_streaks: dict[str, int] = {}
+    for t in teams:
+        mx, _consec_cnt, _avg_gap = consec_stats(rounds_by_team[t.name])
+        all_team_streaks[t.name] = int(mx)
+    global_max_streak = max(all_team_streaks.values(), default=0)
+    triple_teams = [name for name, mx in all_team_streaks.items() if mx >= 3]
+    triple_ok = len(triple_teams) == 0
+    triple_detail = (
+        f"3連戦なし / 最大連戦={global_max_streak}"
+        if triple_ok
+        else f"最大連戦={global_max_streak} / 該当 {len(triple_teams)} ペア: "
+             + ", ".join(sorted(triple_teams)[:10])
+             + (" ..." if len(triple_teams) > 10 else "")
+    )
+    ws7.append(["3連戦なし", "yes" if triple_ok else "no", triple_detail])
+    row_triple = ws7.max_row
+
+    ws7.append(["最大連戦数（全体）", str(global_max_streak), "目標=2（連戦2まで）"])
+    row_max_streak = ws7.max_row
+
+    # Make the 3連戦 summary row stand out.
+    ok_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")  # light green
+    ng_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")  # light red
+    summary_fill = ok_fill if triple_ok else ng_fill
+    for col in range(1, 4):
+        cell = ws7.cell(row=row_triple, column=col)
+        cell.fill = summary_fill
+        cell.font = Font(bold=True)
+        cell.alignment = Alignment(vertical="center")
+
+    for col in range(1, 4):
+        cell = ws7.cell(row=row_max_streak, column=col)
+        cell.font = Font(bold=True)
+        cell.alignment = Alignment(vertical="center")
+
     # 1) 全ペアTARGET_MATCHES_PER_TEAM試合
     violators = [t.name for t in teams if len(rounds_by_team[t.name]) != TARGET_MATCHES_PER_TEAM]
     all_target_ok = len(violators) == 0
@@ -4098,12 +4305,12 @@ def write_personal_schedule_html(
     for (r, team_name) in rt_lookup.keys():
         if team_name:
             rounds_by_team[team_name].add(int(r))
-    back_to_back_slots: set[tuple[str, int]] = set()
+    # We list only the *start* of a consecutive streak (so the 2nd match doesn't look like a start).
+    back_to_back_starts: set[tuple[str, int]] = set()
     for team_name, rset in rounds_by_team.items():
         for r in rset:
-            if (r + 1) in rset:
-                back_to_back_slots.add((team_name, r))
-                back_to_back_slots.add((team_name, r + 1))
+            if (r + 1) in rset and (r - 1) not in rset:
+                back_to_back_starts.add((team_name, r))
 
     def cell_value(team_name: str, rnd: int) -> str:
         slot = rt_lookup.get((rnd, team_name))
@@ -4360,23 +4567,36 @@ def write_personal_schedule_html(
         fh.write("</section>")
 
     def render_back_to_back_table(fh) -> None:
-        # List matches where either side is part of a back-to-back sequence.
+        # List matches where either side *starts* a back-to-back sequence.
         headers = ["試合", "コート", "時刻", "対戦", "連戦メモ"]
         rows: list[dict[str, Any]] = []
         for m in matches:
             t1 = m.team1.name
             t2 = m.team2.name
             r = int(m.round_num)
-            flag1 = (t1, r) in back_to_back_slots
-            flag2 = (t2, r) in back_to_back_slots
+            flag1 = (t1, r) in back_to_back_starts
+            flag2 = (t2, r) in back_to_back_starts
             if not (flag1 or flag2):
                 continue
 
             memo_parts: list[str] = []
-            if flag1:
-                memo_parts.append(f"{t1}が連戦")
-            if flag2:
-                memo_parts.append(f"{t2}が連戦")
+            for team_name, is_start in ((t1, flag1), (t2, flag2)):
+                if not is_start:
+                    continue
+                nxt = rt_lookup.get((r + 1, team_name))
+                nxt_opp = opp_lookup.get((r + 1, team_name))
+                if nxt and nxt_opp:
+                    memo_parts.append(
+                        f"{team_name}は次のR{r+1}も C{nxt[0]} vs {nxt_opp}（{nxt[1]}）で連戦"
+                    )
+                elif nxt:
+                    memo_parts.append(
+                        f"{team_name}は次のR{r+1}も C{nxt[0]}（{nxt[1]}）で連戦"
+                    )
+                else:
+                    memo_parts.append(
+                        f"{team_name}は次のR{r+1}も試合で連戦"
+                    )
             memo = " / ".join(memo_parts)
 
             if include_members and (m.team1.members or m.team2.members):
@@ -4413,7 +4633,7 @@ def write_personal_schedule_html(
         fh.write("<h2>連戦が絡む試合（要確認）</h2>")
         fh.write(
             "<div style='font-size: 13px; line-height: 1.45; margin-bottom: 8px;'>"
-            "<div><small>連戦のペアは直後の審判が厳しいことがあります。負けた側が連続で審判になるケースもあるので、当事者同士で事前に把握して調整してください。</small></div>"
+            "<div><small>ここは『連戦の開始試合』だけを抽出しています（2試合目は重複表示しません）。連戦のペアは直後の審判が厳しいことがあります。負けた側が連続で審判になるケースもあるので、当事者同士で事前に把握して調整してください。</small></div>"
             "</div>"
         )
         fh.write("</section>")
@@ -7224,6 +7444,7 @@ def release_from_team_list(
     best_matches: List[Match] | None = None
     best_teams: List[Team] | None = None
     best_score: int = -1
+    best_key: tuple[int, int, int] | None = None
     best_streak_seen: int | None = None
     tried_targets: Set[int] = set()
     target_candidates = [initial_target] if not auto_mode else list(range(initial_target, 0, -1))
@@ -7259,6 +7480,7 @@ def release_from_team_list(
         best_matches = None
         best_teams = None
         best_score = -1
+        best_key = None
         best_streak_seen = None
 
         for attempt in range(diversity_attempts):
@@ -7301,32 +7523,17 @@ def release_from_team_list(
                     matches = eliminate_mid_session_court_gaps(matches, num_rounds, courts)
                 matches = compact_court_usage(matches, num_rounds, courts)
 
-                def _max_team_streak(ms: List[Match]) -> int:
-                    rounds_map: Dict[str, List[int]] = defaultdict(list)
-                    for m in ms:
-                        rounds_map[m.team1.name].append(m.round_num)
-                        rounds_map[m.team2.name].append(m.round_num)
-                    best = 0
-                    for rs in rounds_map.values():
-                        if not rs:
-                            continue
-                        sr = sorted(rs)
-                        cur = 1
-                        mx = 1
-                        for i in range(1, len(sr)):
-                            if sr[i] == sr[i - 1] + 1:
-                                cur += 1
-                                mx = max(mx, cur)
-                            else:
-                                cur = 1
-                        best = max(best, mx)
-                    return best
-
                 def _consecutive_optimize(ms: List[Match], limit: int) -> List[Match]:
-                    for _ in range(3):
+                    for _ in range(8):
                         if _max_team_streak(ms) <= limit:
                             break
-                        ms = reduce_max_consecutive_streak(ms, num_rounds, courts, max_consecutive=limit)
+                        ms = reduce_max_consecutive_streak(
+                            ms,
+                            num_rounds,
+                            courts,
+                            max_consecutive=limit,
+                            max_iterations=(1600 if limit <= 2 else 800),
+                        )
                         ms = normalize_round_capacity(ms, num_rounds, courts)
                         ms = ensure_round_one_full(ms, num_rounds, courts)
                         if not allow_court_gaps:
@@ -7356,7 +7563,12 @@ def release_from_team_list(
                 continue
 
             score = compute_diversity_score(teams)
-            if score > best_score:
+            consec_pairs = _count_consecutive_pairs(matches)
+            # Prefer fewer consecutive streaks (avoid 3-in-a-row if possible), then fewer back-to-backs,
+            # then maximize diversity.
+            key = (int(streak), int(consec_pairs), int(-score))
+            if best_key is None or key < best_key:
+                best_key = key
                 best_score = score
                 best_matches = matches
                 best_teams = teams

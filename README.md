@@ -24,6 +24,18 @@ pip install -U pip
 pip install -e .
 ```
 
+### Windows PowerShell（おすすめの実行方法）
+
+PCの環境によっては「システムPython側の `bsched.exe`」が優先されてしまうことがあります。
+迷わないために、このリポジトリ直下の [bsched.ps1](bsched.ps1) を使うのが安全です（必ず `.venv` のPythonで実行されます）。
+
+例:
+
+```powershell
+./bsched.ps1 --help
+./bsched.ps1 generate-schedule --matches-per-team 6 --diversity-attempts 20
+```
+
 ## 使い方
 
 初見の人は、まず [工程表.md](工程表.md)（= 運用の流れ）だけ読むと迷いにくいです。
