@@ -4062,6 +4062,20 @@ def write_personal_schedule_html(
     header_rounds = [f"R{r}" for r in range(1, num_rounds + 1)]
     team_lookup = {t.name: t for t in teams}
 
+    # Match count summary (per team) for human checks.
+    match_counts_by_team: Counter[str] = Counter()
+    for m in matches:
+        if m.team1 and m.team1.name:
+            match_counts_by_team[m.team1.name] += 1
+        if m.team2 and m.team2.name:
+            match_counts_by_team[m.team2.name] += 1
+
+    team_names = [t.name for t in teams if t.name]
+    match_counts = [int(match_counts_by_team.get(name, 0)) for name in team_names]
+    match_count_min = min(match_counts) if match_counts else 0
+    match_count_max = max(match_counts) if match_counts else 0
+    match_count_uniform = bool(match_counts) and (match_count_min == match_count_max)
+
     def club_root(group_name: str | None) -> str:
         if not group_name:
             return ""
@@ -4078,6 +4092,18 @@ def write_personal_schedule_html(
         opp_lookup[(m.round_num, m.team2.name)] = m.team1.name
         opp_members_lookup[(m.round_num, m.team1.name)] = m.team2.members
         opp_members_lookup[(m.round_num, m.team2.name)] = m.team1.members
+
+    # Back-to-back (consecutive rounds) detection.
+    rounds_by_team: dict[str, set[int]] = defaultdict(set)
+    for (r, team_name) in rt_lookup.keys():
+        if team_name:
+            rounds_by_team[team_name].add(int(r))
+    back_to_back_slots: set[tuple[str, int]] = set()
+    for team_name, rset in rounds_by_team.items():
+        for r in rset:
+            if (r + 1) in rset:
+                back_to_back_slots.add((team_name, r))
+                back_to_back_slots.add((team_name, r + 1))
 
     def cell_value(team_name: str, rnd: int) -> str:
         slot = rt_lookup.get((rnd, team_name))
@@ -4311,6 +4337,106 @@ def write_personal_schedule_html(
                 fh.write(f"<td{td_cls}>{escape(value)}</td>")
             fh.write("</tr>")
         fh.write("</tbody></table></div></section>")
+
+    def render_match_count_summary(fh) -> None:
+        fh.write("<section class='table-block' id='match-count-summary-section'>")
+        fh.write("<h2>試合数サマリー</h2>")
+        fh.write("<div style='font-size: 13px; line-height: 1.45;'>")
+        fh.write(
+            f"<div><span class='team-meta'>総試合数</span>: {len(matches)}（対戦数）</div>"
+        )
+        if match_count_uniform:
+            fh.write(
+                f"<div><span class='team-meta'>各ペア試合数（実績）</span>: 全{len(team_names)}ペア {match_count_min}試合</div>"
+            )
+        else:
+            fh.write(
+                f"<div><span class='team-meta'>各ペア試合数（実績）</span>: min={match_count_min} / max={match_count_max}（全{len(team_names)}ペア）</div>"
+            )
+        fh.write(
+            "<div><small>注: 1試合は2ペアが出場するため、ペア別試合数を合計すると総試合数の2倍になります。</small></div>"
+        )
+        fh.write("</div>")
+        fh.write("</section>")
+
+    def render_back_to_back_table(fh) -> None:
+        # List matches where either side is part of a back-to-back sequence.
+        headers = ["試合", "コート", "時刻", "対戦", "連戦メモ"]
+        rows: list[dict[str, Any]] = []
+        for m in matches:
+            t1 = m.team1.name
+            t2 = m.team2.name
+            r = int(m.round_num)
+            flag1 = (t1, r) in back_to_back_slots
+            flag2 = (t2, r) in back_to_back_slots
+            if not (flag1 or flag2):
+                continue
+
+            memo_parts: list[str] = []
+            if flag1:
+                memo_parts.append(f"{t1}が連戦")
+            if flag2:
+                memo_parts.append(f"{t2}が連戦")
+            memo = " / ".join(memo_parts)
+
+            if include_members and (m.team1.members or m.team2.members):
+                t1m = escape(m.team1.members or "")
+                t2m = escape(m.team2.members or "")
+                versus = (
+                    f"{escape(t1)} vs {escape(t2)}"
+                    f"<br><small>{t1m} / {t2m}</small>"
+                )
+                versus_cell = (versus, True)
+            else:
+                versus_cell = (f"{t1} vs {t2}", False)
+
+            club1 = team_lookup.get(t1).group if t1 in team_lookup and team_lookup.get(t1) else ""
+            club2 = team_lookup.get(t2).group if t2 in team_lookup and team_lookup.get(t2) else ""
+            rows.append(
+                {
+                    "cells": [
+                        (f"R{r}", False),
+                        (f"C{m.court}", False),
+                        (m.start_time.strftime("%H:%M"), False),
+                        versus_cell,
+                        (memo, False),
+                    ],
+                    "meta": {
+                        "teams": [t1, t2],
+                        "clubs": [c for c in (club1, club2) if c],
+                        "club_roots": sorted({root for root in (club_root(club1), club_root(club2)) if root}),
+                    },
+                }
+            )
+
+        fh.write("<section class='table-block' id='back-to-back-notes-section'>")
+        fh.write("<h2>連戦が絡む試合（要確認）</h2>")
+        fh.write(
+            "<div style='font-size: 13px; line-height: 1.45; margin-bottom: 8px;'>"
+            "<div><small>連戦のペアは直後の審判が厳しいことがあります。負けた側が連続で審判になるケースもあるので、当事者同士で事前に把握して調整してください。</small></div>"
+            "</div>"
+        )
+        fh.write("</section>")
+
+        if not rows:
+            # No consecutive-round matches.
+            return
+
+        render_table(
+            fh,
+            "back-to-back",
+            "連戦が絡む試合（一覧）",
+            headers,
+            rows,
+            enable_team_filter=True,
+            team_options=team_filter_options,
+            enable_club_filter=True,
+            club_options=club_options,
+            enable_club_root_filter=True,
+            club_root_options=club_root_options,
+            keyword_options=keyword_candidates,
+            sticky_columns={0: ["round-col"], 1: ["court-col"]},
+        )
 
     def render_table(
         fh,
@@ -4612,6 +4738,7 @@ td.sticky-col {background: #fff;}
                 """
             )
 
+        render_match_count_summary(fh)
         render_summary_table(fh)
         render_table(
             fh,
@@ -4673,6 +4800,10 @@ td.sticky-col {background: #fff;}
             keyword_options=keyword_candidates,
             sticky_columns={0: ["round-col"], 1: ["court-col"]},
         )
+
+        # Put notes and extracted list at the bottom.
+        render_back_to_back_table(fh)
+
         fh.write(
             r"""<script>
 const HTML_PASS_HASH=""" + repr(pass_hash) + r""";
