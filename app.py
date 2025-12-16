@@ -122,7 +122,7 @@ with st.sidebar:
         "得点記入表: 1枚あたりの枚数",
         min_value=1,
         max_value=20,
-        value=10,
+        value=8,
         step=1,
         key="gen_score_per_page",
     )
@@ -140,7 +140,8 @@ with st.sidebar:
     st.divider()
     st.header("編集後Excel→HTML再生成")
     st.caption("編集したスケジュールExcel（対戦表/ペア一覧）をアップロードして、HTMLを作り直します。")
-    st.caption("※集計表（xlsm）を使う運用の人は、Excelマクロで『対戦一覧_短縮』を必ず最新にして保存してから使ってください（古いままだと古い対戦が出ます）。")
+    st.caption("または、集計表（.xlsm/.xlsx）の『対戦一覧_短縮』から最終配布物（Excel/HTML一式）を作り直します。")
+    st.caption("※集計表運用の人は、Excelマクロで『対戦一覧_短縮』を必ず最新にして保存してから使ってください（古いままだと古い対戦が出ます）。")
     edited_schedule = st.file_uploader(
         "編集後スケジュールExcel (.xlsx / .xlsm)",
         type=["xlsx", "xlsm"],
@@ -162,7 +163,7 @@ with st.sidebar:
     regen_wall_html = st.checkbox("壁貼り用HTMLも出力", value=True)
     regen_wall_cpp = st.selectbox("壁貼り用: 1ページあたりコート数", options=[1, 2, 3], index=2)
     regen_score_sheets = st.checkbox("得点記入表HTMLも出力", value=True)
-    regen_score_per_page = st.number_input("得点記入表: 1枚あたりの枚数", min_value=1, max_value=20, value=10, step=1)
+    regen_score_per_page = st.number_input("得点記入表: 1枚あたりの枚数", min_value=1, max_value=20, value=8, step=1)
     regen_score_columns = st.number_input("得点記入表: 列数", min_value=1, max_value=4, value=2, step=1)
 
     regen = st.button("HTMLを再生成", use_container_width=True)
@@ -221,6 +222,8 @@ def _set_regen_html(*, html_name: str, html_bytes: bytes, include_members: bool)
 
 def _set_regen_outputs(
     *,
+    excel_name: str | None = None,
+    excel_bytes: bytes | None = None,
     html_name: str,
     html_bytes: bytes,
     include_members: bool,
@@ -230,6 +233,8 @@ def _set_regen_outputs(
     score_bytes: bytes | None = None,
 ) -> None:
     _set_regen_html(html_name=html_name, html_bytes=html_bytes, include_members=include_members)
+    st.session_state.regen_excel_name = excel_name
+    st.session_state.regen_excel_bytes = excel_bytes
     st.session_state.regen_wall_name = wall_name
     st.session_state.regen_wall_bytes = wall_bytes
     st.session_state.regen_score_name = score_name
@@ -376,13 +381,51 @@ if 'regen' in locals() and regen:
                 input_path = tmp_dir / f"edited_schedule{suffix}"
                 input_path.write_bytes(edited_schedule.getvalue())
 
-                matches, teams, inferred_rounds, inferred_courts = scheduler.load_schedule_from_xlsx(
-                    str(input_path),
-                    fallback_start_time_hhmm=str(start_time),
-                    fallback_round_minutes=int(round_minutes),
-                )
+                # Two supported inputs:
+                #  1) Edited schedule Excel (expects a '対戦表' grid)
+                #  2) Summary workbook (xlsm/xlsx) that contains '対戦一覧_短縮'
+                # We auto-detect by trying to load the short list first.
+                from_summary = False
+                try:
+                    matches, teams, inferred_rounds, inferred_courts = scheduler.load_schedule_from_short_list_xlsx(
+                        str(input_path),
+                        sheet_name="対戦一覧_短縮",
+                        fallback_start_time_hhmm=str(start_time),
+                        fallback_round_minutes=int(round_minutes),
+                    )
+                    from_summary = True
+                except Exception:
+                    matches, teams, inferred_rounds, inferred_courts = scheduler.load_schedule_from_xlsx(
+                        str(input_path),
+                        fallback_start_time_hhmm=str(start_time),
+                        fallback_round_minutes=int(round_minutes),
+                    )
 
-                out_name = Path(edited_schedule.name).with_suffix(".html").name if edited_schedule.name else "schedule.html"
+                regen_excel_name = None
+                regen_excel_bytes = None
+                if from_summary:
+                    base = Path(edited_schedule.name).stem if edited_schedule.name else "summary"
+                    out_xlsx = tmp_dir / f"{base}_from_summary.xlsx"
+                    scheduler.write_to_excel_like_summary(
+                        matches,
+                        teams,
+                        str(out_xlsx),
+                        True,
+                        int(inferred_rounds),
+                        int(inferred_courts),
+                        start_time_hhmm=str(start_time),
+                        round_minutes=int(round_minutes),
+                        excel_include_members=False,
+                        excel_members_below=True,
+                        excel_members_vlookup=True,
+                        normalize_round_times=False,
+                    )
+                    regen_excel_name = out_xlsx.name
+                    regen_excel_bytes = _read_bytes(out_xlsx)
+                    out_name = out_xlsx.with_suffix(".html").name
+                else:
+                    out_name = Path(edited_schedule.name).with_suffix(".html").name if edited_schedule.name else "schedule.html"
+
                 out_path = tmp_dir / out_name
                 scheduler.write_personal_schedule_html(
                     matches,
@@ -430,6 +473,8 @@ if 'regen' in locals() and regen:
                     score_bytes = _read_bytes(score_path)
 
             _set_regen_outputs(
+                excel_name=regen_excel_name,
+                excel_bytes=regen_excel_bytes,
                 html_name=out_name,
                 html_bytes=html_bytes,
                 include_members=bool(regen_include_members),
@@ -538,6 +583,8 @@ if st.session_state.get("regen_html_bytes") and st.session_state.get("regen_html
     )
 
     regen_bundle_files: dict[str, bytes] = {}
+    if st.session_state.get("regen_excel_bytes") and st.session_state.get("regen_excel_name"):
+        regen_bundle_files[str(st.session_state.regen_excel_name)] = st.session_state.regen_excel_bytes
     regen_bundle_files[str(st.session_state.regen_html_name)] = st.session_state.regen_html_bytes
     if st.session_state.get("regen_wall_bytes") and st.session_state.get("regen_wall_name"):
         regen_bundle_files[str(st.session_state.regen_wall_name)] = st.session_state.regen_wall_bytes
@@ -550,6 +597,15 @@ if st.session_state.get("regen_html_bytes") and st.session_state.get("regen_html
             data=_build_zip_bytes(files=regen_bundle_files, zip_comment="Badminton Scheduler regen bundle"),
             file_name=zip_name,
             mime="application/zip",
+            use_container_width=True,
+        )
+
+    if st.session_state.get("regen_excel_bytes") and st.session_state.get("regen_excel_name"):
+        st.download_button(
+            "再生成Excelをダウンロード",
+            data=st.session_state.regen_excel_bytes,
+            file_name=st.session_state.regen_excel_name,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
         )
 
