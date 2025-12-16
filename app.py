@@ -141,7 +141,11 @@ with st.sidebar:
     st.header("編集後Excel→HTML再生成")
     st.caption("編集したスケジュールExcel（対戦表/ペア一覧）をアップロードして、HTMLを作り直します。")
     st.caption("※集計表（xlsm）を使う運用の人は、Excelマクロで『対戦一覧_短縮』を必ず最新にして保存してから使ってください（古いままだと古い対戦が出ます）。")
-    edited_schedule = st.file_uploader("編集後スケジュールExcel (.xlsx)", type=["xlsx"], key="edited_schedule_xlsx")
+    edited_schedule = st.file_uploader(
+        "編集後スケジュールExcel (.xlsx / .xlsm)",
+        type=["xlsx", "xlsm"],
+        key="edited_schedule_xlsx",
+    )
 
     regen_include_members = st.checkbox(
         "HTMLに選手名（氏名）を含める（標準ON）",
@@ -360,7 +364,16 @@ if 'regen' in locals() and regen:
         try:
             with tempfile.TemporaryDirectory() as td:
                 tmp_dir = Path(td)
-                input_path = tmp_dir / "edited_schedule.xlsx"
+                # Keep the original suffix so Excel/macro workbooks (.xlsm) are handled naturally.
+                suffix = ".xlsx"
+                try:
+                    if edited_schedule.name:
+                        sfx = Path(edited_schedule.name).suffix.lower()
+                        if sfx in (".xlsx", ".xlsm"):
+                            suffix = sfx
+                except Exception:
+                    pass
+                input_path = tmp_dir / f"edited_schedule{suffix}"
                 input_path.write_bytes(edited_schedule.getvalue())
 
                 matches, teams, inferred_rounds, inferred_courts = scheduler.load_schedule_from_xlsx(

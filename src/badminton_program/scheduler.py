@@ -3524,6 +3524,12 @@ def write_to_excel_like_summary(
     normalize_round_times: bool = True,
 ):
     wb = openpyxl.Workbook()
+    # Ensure formulas (e.g., VLOOKUP for members) are recalculated when the file is opened in Excel.
+    try:
+        wb.calculation.calcMode = "auto"
+        wb.calculation.fullCalcOnLoad = True
+    except Exception:
+        pass
     from openpyxl.styles import PatternFill, Font, Border, Side, Alignment
     from openpyxl.formatting.rule import FormulaRule
     from openpyxl.utils import get_column_letter
@@ -3559,8 +3565,10 @@ def write_to_excel_like_summary(
             end_time,
         ])
     
-    # Sheet 2: 対戦表
-    ws2 = wb.create_sheet("対戦表")
+    # Sheet 2: 対戦表（氏名入り）
+    # 2-row layout per round: row 1 = pair names, row 2 = member names (VLOOKUP).
+    # This is the only editable match-table sheet.
+    ws2 = wb.create_sheet("対戦表（氏名入り）")
     # Columns: 試合, 時間, then for each court two columns: コートN-チーム1, コートN-チーム2
     header = ["試合", "開始", "終了"]
     for c in range(1, max_court + 1):
@@ -3666,6 +3674,44 @@ def write_to_excel_like_summary(
                 fill = level_fill.get(match.team1.level)
                 apply_level_fill_and_alignment(row_idx=row_idx_name, court=court, fill=fill)
                 apply_level_fill_and_alignment(row_idx=row_idx_members, court=court, fill=fill)
+
+    # Sheet 2b: 対戦表（ペア名のみ）
+    # - Links from "対戦表（氏名入り）" (pair-name row) so edits propagate.
+    # - Intended for copy/paste into the macro summary sheet.
+    ws2_pairs = wb.create_sheet("対戦表（ペア名のみ）")
+    ws2_pairs.append(header)
+
+    def ref_or_blank(*, ref: str) -> str:
+        # Excel shows 0 when referencing an empty cell (e.g., =A1 where A1 is blank).
+        # For copy/paste workflows, blank is much easier than 0.
+        return f"=IF({ref}=0,\"\",{ref})"
+
+    for round_num in range(1, num_rounds + 1):
+        # ws2: header row 1, then each round takes 2 rows (names, members) when excel_members_below=True
+        src_row_names = round_name_row_index(round_num)
+        dst_row = ws2_pairs.max_row + 1
+
+        ws2_pairs.cell(row=dst_row, column=1).value = ref_or_blank(ref=f"'対戦表（氏名入り）'!A{src_row_names}")
+        ws2_pairs.cell(row=dst_row, column=2).value = ref_or_blank(ref=f"'対戦表（氏名入り）'!B{src_row_names}")
+        ws2_pairs.cell(row=dst_row, column=3).value = ref_or_blank(ref=f"'対戦表（氏名入り）'!C{src_row_names}")
+
+        for court in range(1, max_court + 1):
+            col_team1 = 3 + (court - 1) * 2 + 1
+            col_team2 = col_team1 + 1
+            ref1 = f"'対戦表（氏名入り）'!{get_column_letter(col_team1)}{src_row_names}"
+            ref2 = f"'対戦表（氏名入り）'!{get_column_letter(col_team2)}{src_row_names}"
+            ws2_pairs.cell(row=dst_row, column=col_team1).value = ref_or_blank(ref=ref1)
+            ws2_pairs.cell(row=dst_row, column=col_team2).value = ref_or_blank(ref=ref2)
+
+            match = next((m for m in matches if m.round_num == round_num and m.court == court), None)
+            if match:
+                fill = level_fill.get(match.team1.level)
+                # Reuse the same look as the main sheet.
+                ws2_pairs.cell(row=dst_row, column=col_team1).alignment = Alignment(wrap_text=True, vertical="top")
+                ws2_pairs.cell(row=dst_row, column=col_team2).alignment = Alignment(wrap_text=True, vertical="top")
+                if fill:
+                    ws2_pairs.cell(row=dst_row, column=col_team1).fill = fill
+                    ws2_pairs.cell(row=dst_row, column=col_team2).fill = fill
 
     # Sheet 3: ペア一覧（試合数）
     ws3 = wb.create_sheet("ペア一覧")
@@ -3800,7 +3846,7 @@ def write_to_excel_like_summary(
                 max_lines = max(max_lines, explicit, approx)
             ws.row_dimensions[row_idx].height = base_height * max_lines
 
-    for ws in [ws1, ws2, ws3, ws4, ws4_team, ws4_round]:
+    for ws in [ws1, ws2, ws2_pairs, ws3, ws4, ws4_team, ws4_round]:
         style_sheet(ws)
 
     if excel_members_below:
@@ -3853,6 +3899,28 @@ def write_to_excel_like_summary(
                 # Dotted line between opponents (team1 right edge / team2 left edge)
                 apply_team_block_border(name_row=name_row, members_row=members_row, col=col_team1, opponent_side="right")
                 apply_team_block_border(name_row=name_row, members_row=members_row, col=col_team2, opponent_side="left")
+
+        # Also draw thick/dotted borders for the 1-row "対戦表（ペア名のみ）" sheet.
+        ws2_pairs.freeze_panes = "D2"
+        for cell in ws2_pairs[1]:
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        ws2_pairs.row_dimensions[1].height = 36
+
+        def apply_vs_border_single_row(*, row_idx: int, col: int, opponent_side: str) -> None:
+            if opponent_side not in ("left", "right"):
+                raise ValueError("opponent_side must be 'left' or 'right'")
+            cell = ws2_pairs.cell(row=row_idx, column=col)
+            left_side = dotted if opponent_side == "left" else thick
+            right_side = dotted if opponent_side == "right" else thick
+            cell.border = Border(left=left_side, right=right_side, top=thick, bottom=thick)
+
+        for round_num in range(1, num_rounds + 1):
+            row_idx = 1 + round_num
+            for court in range(1, max_court + 1):
+                col_team1 = 3 + (court - 1) * 2 + 1
+                col_team2 = col_team1 + 1
+                apply_vs_border_single_row(row_idx=row_idx, col=col_team1, opponent_side="right")
+                apply_vs_border_single_row(row_idx=row_idx, col=col_team2, opponent_side="left")
 
     # 表示試合数 vs 実試合数サマリ (対戦表シートに追加)
     def is_round_row(row_idx: int) -> bool:
