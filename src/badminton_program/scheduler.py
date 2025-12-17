@@ -5705,8 +5705,8 @@ def write_wall_schedule_html(
 ) -> None:
     """Generate a print-friendly (wall-posting) HTML.
 
-    - 1ページあたり1〜3コート（画面表示の面付け）
-    - 印刷も『1ページあたり1〜3コート』（courts_per_pageに従う）
+    - 1ページあたり1〜4コート（画面表示の面付け）
+    - 印刷も『1ページあたり1〜4コート』（courts_per_pageに従う）
     - No JavaScript required
     """
 
@@ -5914,17 +5914,25 @@ def write_wall_schedule_html(
         shape = shapes[group_index.get(g, 0) % len(shapes)]
         chip = _chip_svg(base_hex, shape)
 
-        if team.members:
-            text = f"{escape(name)}<br><small>{escape(team.members)}</small>"
-        else:
-            text = escape(name)
-        return f"<div class='team-cell'>{chip}<div class='team-text'>{text}</div></div>"
+        member_html = f"<small>{escape(team.members)}</small>" if team.members else ""
+        # Score entry is under member names (one number per team) so the wall table stays narrow.
+        score_html = "<div class='score-entry'><span class='score-label'>得点</span><span class='score-blank'></span></div>"
+        return (
+            "<div class='team-cell'>"
+            f"{chip}"
+            "<div class='team-text'>"
+            f"<div class='team-name'>{escape(name)}</div>"
+            f"{member_html}"
+            f"{score_html}"
+            "</div>"
+            "</div>"
+        )
 
     cpp = int(courts_per_page)
     if cpp <= 0:
         cpp = 1
-    if cpp > 3:
-        cpp = 3
+    if cpp > 4:
+        cpp = 4
 
     with path.open("w", encoding="utf-8") as fh:
         fh.write("<!DOCTYPE html><html lang='ja'><head><meta charset='utf-8'>")
@@ -5942,6 +5950,7 @@ h2 {margin: 18px 0 8px; font-size: 16px;}
 .cols-1 {grid-template-columns: 1fr;}
 .cols-2 {grid-template-columns: 1fr 1fr;}
 .cols-3 {grid-template-columns: 1fr 1fr 1fr;}
+.cols-4 {grid-template-columns: 1fr 1fr 1fr 1fr;}
 
 /* Scrolling wrapper so sticky columns work reliably */
 .court-wrap {overflow: auto; -webkit-overflow-scrolling: touch; max-width: 100%;}
@@ -5957,21 +5966,24 @@ tr:nth-child(even) td {background: #fafafa;}
 .team-cell {display: flex; gap: 6px; align-items: flex-start;}
 .team-text {min-width: 0;}
 .chip {flex: 0 0 auto; margin-top: 1px;}
+.team-name {font-weight: 800;}
+
+/* Score entry inside team cell */
+.score-entry {margin-top: 3px; display: flex; gap: 6px; align-items: baseline;}
+.score-label {font-size: 11px; font-weight: 900; white-space: nowrap; color: #111;}
+.score-blank {flex: 1 1 auto; min-width: 26px; border-bottom: 2px solid #111; height: 12px;}
 
 /* Column sizing + sticky left columns (screen) */
-:root { --wall-col-round: 84px; --wall-col-time: 62px; --wall-col-score: 54px; }
+:root { --wall-col-round: 84px; --wall-col-time: 62px; }
 th.round-col {min-width: var(--wall-col-round); width: var(--wall-col-round);}
 th.time-col {min-width: var(--wall-col-time); width: var(--wall-col-time);}
-th.score-col {min-width: var(--wall-col-score); width: var(--wall-col-score); text-align: center;}
 
 th.round-col, td.round {position: sticky; left: 0; z-index: 2; background: #f2f2f2;}
 th.time-col, td.time {position: sticky; left: var(--wall-col-round); z-index: 2; background: #f2f2f2;}
 td.round, td.time {background: #fff;}
 tr:nth-child(even) td.round, tr:nth-child(even) td.time {background: #fafafa;}
 
-/* Score entry cells */
-td.score {text-align: center; font-weight: 700;}
-/* (no underline; just use the cell box) */
+/* (score entry moved under member names) */
 
 /* Thicker borders to clearly separate courts */
 th.group-start, td.group-start {border-left: 3px solid #111;}
@@ -6006,17 +6018,23 @@ th.court-head {text-align: center; background: #e9e9e9;}
         table { min-width: 0 !important; font-size: 9pt; line-height: 1.15; }
         th, td { padding: 1.3mm 1.6mm; }
         td.team small { font-size: 8pt; }
+        .score-label { font-size: 8pt; }
+        .score-blank { height: 7mm; border-bottom-width: 2px; }
 
         /* 1〜2コート/枚は縦が余りやすいので、字を大きくして読みやすさ優先 */
         body.cpp-2 { --thead-row-h: 10mm; }
         body.cpp-2 table { font-size: 11.5pt; line-height: 1.18; }
         body.cpp-2 th, body.cpp-2 td { padding: 2.0mm 2.1mm; }
         body.cpp-2 td.team small { font-size: 10.25pt; }
+        body.cpp-2 .score-label { font-size: 9.5pt; }
+        body.cpp-2 .score-blank { height: 8.5mm; }
 
         body.cpp-1 { --thead-row-h: 11mm; }
         body.cpp-1 table { font-size: 13pt; line-height: 1.2; }
         body.cpp-1 th, body.cpp-1 td { padding: 2.4mm 2.4mm; }
         body.cpp-1 td.team small { font-size: 11.5pt; }
+        body.cpp-1 .score-label { font-size: 10.5pt; }
+        body.cpp-1 .score-blank { height: 9mm; }
     /* Sticky is not needed for print */
     th.round-col, td.round, th.time-col, td.time { position: static !important; }
   h2 { margin-top: 0; }
@@ -6053,16 +6071,14 @@ th.court-head {text-align: center; background: #e9e9e9;}
             fh.write("<th class='round-col' rowspan='2'>試合</th>")
             fh.write("<th class='time-col' rowspan='2'>開始</th>")
             for court in chunk:
-                fh.write(f"<th class='court-head group-start group-end' colspan='4'>コート{court}</th>")
+                fh.write(f"<th class='court-head group-start group-end' colspan='2'>コート{court}</th>")
             fh.write("</tr>")
 
             # Header row 2: per-court columns
             fh.write("<tr>")
             for _court in chunk:
                 fh.write("<th class='group-start'>チーム1</th>")
-                fh.write("<th>チーム2</th>")
-                fh.write("<th class='score-col'>得点（チーム1）</th>")
-                fh.write("<th class='score-col group-end'>得点（チーム2）</th>")
+                fh.write("<th class='group-end'>チーム2</th>")
             fh.write("</tr>")
 
             fh.write("</thead><tbody>")
@@ -6101,9 +6117,7 @@ th.court-head {text-align: center; background: #e9e9e9;}
                     t1_style = _cell_style(escape(t1_bg), escape(t1_base))
                     t2_style = _cell_style(escape(t2_bg), escape(t2_base))
                     fh.write(f"<td class='team group-start group-mid'{t1_style}>{t1_html}</td>")
-                    fh.write(f"<td class='team group-mid'{t2_style}>{t2_html}</td>")
-                    fh.write(f"<td class='score group-mid'></td>")
-                    fh.write(f"<td class='score group-end group-mid'></td>")
+                    fh.write(f"<td class='team group-end group-mid'{t2_style}>{t2_html}</td>")
 
                 fh.write("</tr>")
             fh.write("</tbody></table></div></section>")

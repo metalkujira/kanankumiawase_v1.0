@@ -123,7 +123,7 @@ with st.sidebar:
 
     st.markdown("#### 追加出力（任意）")
     gen_wall_html = st.checkbox("壁貼り用HTMLも出力", value=True, key="gen_wall_html")
-    gen_wall_cpp = st.selectbox("壁貼り用: 1ページあたりコート数", options=[1, 2, 3], index=2, key="gen_wall_cpp")
+    gen_wall_cpp = st.selectbox("壁貼り用: 1ページあたりコート数", options=[1, 2, 3, 4], index=2, key="gen_wall_cpp")
     gen_wall_cell_bg = st.checkbox(
         "壁貼り(一覧表): チームセルの背景も塗る（印刷で背景ON推奨）",
         value=False,
@@ -181,7 +181,7 @@ with st.sidebar:
 
     st.markdown("#### 追加出力（任意）")
     regen_wall_html = st.checkbox("壁貼り用HTMLも出力", value=True)
-    regen_wall_cpp = st.selectbox("壁貼り用: 1ページあたりコート数", options=[1, 2, 3], index=2)
+    regen_wall_cpp = st.selectbox("壁貼り用: 1ページあたりコート数", options=[1, 2, 3, 4], index=2)
     regen_wall_cell_bg = st.checkbox(
         "壁貼り(一覧表): チームセルの背景も塗る（印刷で背景ON推奨）",
         value=False,
