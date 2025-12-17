@@ -59,7 +59,7 @@ with st.sidebar:
     st.download_button(
         "テンプレExcel(ヘッダーのみ)をダウンロード",
         data=scheduler.build_team_list_template_bytes(),
-        file_name="チームリスト_テンプレ.xlsx",
+        file_name="チームリスト -v3.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
     )
@@ -71,7 +71,7 @@ with st.sidebar:
     st.download_button(
         label="チーム一覧サンプル（ダミーデータ）をダウンロード",
         data=sample_bytes,
-        file_name="チームリスト_サンプル.xlsx",
+        file_name="チームリスト -v3_サンプル.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
     )

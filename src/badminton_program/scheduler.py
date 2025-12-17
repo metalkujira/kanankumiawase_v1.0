@@ -5971,7 +5971,7 @@ tr:nth-child(even) td {background: #fafafa;}
 /* Score entry inside team cell */
 .score-entry {margin-top: 3px; display: flex; gap: 6px; align-items: baseline;}
 .score-label {font-size: 11px; font-weight: 900; white-space: nowrap; color: #111;}
-.score-blank {flex: 1 1 auto; min-width: 26px; border-bottom: 2px solid #111; height: 12px;}
+.score-blank {flex: 1 1 auto; min-width: 30px; border-bottom: 3px solid #111; height: 18px;}
 
 /* Column sizing + sticky left columns (screen) */
 :root { --wall-col-round: 84px; --wall-col-time: 62px; }
@@ -6017,9 +6017,13 @@ th.court-head {text-align: center; background: #e9e9e9;}
         /* Default (3コート/枚相当の密度) */
         table { min-width: 0 !important; font-size: 9pt; line-height: 1.15; }
         th, td { padding: 1.3mm 1.6mm; }
-        td.team small { font-size: 8pt; }
+        /* Make grid lines readable when printed */
+        th, td { border-color: #444; }
+        td.team small { font-size: 7.25pt; }
+        .score-entry { margin-top: 1.0mm; }
         .score-label { font-size: 8pt; }
-        .score-blank { height: 7mm; border-bottom-width: 2px; }
+        /* Handwriting area: taller + thicker line */
+        .score-blank { height: 10mm; border-bottom-width: 3px; }
 
         /* 1〜2コート/枚は縦が余りやすいので、字を大きくして読みやすさ優先 */
         body.cpp-2 { --thead-row-h: 10mm; }
@@ -6027,14 +6031,14 @@ th.court-head {text-align: center; background: #e9e9e9;}
         body.cpp-2 th, body.cpp-2 td { padding: 2.0mm 2.1mm; }
         body.cpp-2 td.team small { font-size: 10.25pt; }
         body.cpp-2 .score-label { font-size: 9.5pt; }
-        body.cpp-2 .score-blank { height: 8.5mm; }
+        body.cpp-2 .score-blank { height: 11mm; border-bottom-width: 3px; }
 
         body.cpp-1 { --thead-row-h: 11mm; }
         body.cpp-1 table { font-size: 13pt; line-height: 1.2; }
         body.cpp-1 th, body.cpp-1 td { padding: 2.4mm 2.4mm; }
         body.cpp-1 td.team small { font-size: 11.5pt; }
         body.cpp-1 .score-label { font-size: 10.5pt; }
-        body.cpp-1 .score-blank { height: 9mm; }
+        body.cpp-1 .score-blank { height: 12mm; border-bottom-width: 3px; }
     /* Sticky is not needed for print */
     th.round-col, td.round, th.time-col, td.time { position: static !important; }
   h2 { margin-top: 0; }
