@@ -5469,6 +5469,227 @@ td.blank-sign {min-height: 15mm; height: auto;}
         fh.write("</body></html>")
 
 
+def write_wall_cards_html(
+    matches: List[Match],
+    teams: List[Team],
+    output_path: str,
+    *,
+    columns: int = 4,
+    include_members: bool = True,
+    round_minutes: int = DEFAULT_ROUND_MINUTES,
+    title: str = "壁貼り（カード式・得点欄付き）",
+) -> None:
+    """Write a wall-posting HTML using match cards.
+
+    - 1試合=1カード
+    - 得点欄は「1試合につき1行」（例: ____ : ____）
+    - 印刷しやすいように多段組（columns=4/5など）
+
+    This is intended to be saved as PDF (Ctrl+P → PDF) and posted on the wall.
+    """
+
+    if columns <= 0:
+        raise ValueError("columns must be positive")
+    if round_minutes <= 0:
+        raise ValueError("round_minutes must be positive")
+
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    team_lookup = {t.name: t for t in teams}
+
+    # Keep a stable order: time (round) then court.
+    ms = sorted(matches, key=lambda m: (m.round_num, m.court))
+
+    def members_for(name: str, fallback: str) -> str:
+        if not include_members:
+            return ""
+        t = team_lookup.get(name)
+        return (t.members if (t and t.members) else fallback) or ""
+
+    def fmt_time(dt: datetime) -> str:
+        return dt.strftime("%H:%M")
+
+    def fmt_end(dt: datetime) -> str:
+        return (dt + timedelta(minutes=int(round_minutes))).strftime("%H:%M")
+
+    def esc(s: str) -> str:
+        return escape(s) if s else ""
+
+    # --- Lightweight team marker (SVG chip) for quick visual scanning ---
+    import re
+    import colorsys
+
+    def _team_group_key(team_name: str) -> str:
+        s = (team_name or "").strip()
+        if not s:
+            return ""
+        m = re.match(r"^([^0-9A-Za-z]+)", s)
+        if m:
+            key = m.group(1).strip()
+            if key:
+                return key
+        m2 = re.match(r"^(.+?)(?=\d)", s)
+        if m2:
+            key = m2.group(1).strip()
+            if key:
+                return key
+        return s
+
+    def _rgb_to_hex(rgb: tuple[int, int, int]) -> str:
+        r, g, b = rgb
+        r = max(0, min(255, int(r)))
+        g = max(0, min(255, int(g)))
+        b = max(0, min(255, int(b)))
+        return f"#{r:02x}{g:02x}{b:02x}"
+
+    def _hsl_to_hex(h: float, s: float, l: float) -> str:
+        r, g, b = colorsys.hls_to_rgb((h % 360.0) / 360.0, l / 100.0, s / 100.0)
+        return _rgb_to_hex((int(round(r * 255)), int(round(g * 255)), int(round(b * 255))))
+
+    team_names: list[str] = sorted(
+        {
+            t
+            for m in matches
+            for t in (
+                (m.team1.name if m.team1 else ""),
+                (m.team2.name if m.team2 else ""),
+            )
+            if t
+        }
+    )
+    group_by_name: dict[str, str] = {name: _team_group_key(name) for name in team_names}
+    groups: list[str] = sorted({g for g in group_by_name.values() if g})
+    group_index: dict[str, int] = {g: i for i, g in enumerate(groups)}
+    shapes = ["circle", "square", "triangle", "diamond", "hex", "star"]
+
+    _VIVID_BASE_COLORS: list[str] = [
+        "#e6194B",
+        "#3cb44b",
+        "#4363d8",
+        "#f58231",
+        "#911eb4",
+        "#42d4f4",
+        "#ffe119",
+        "#f032e6",
+        "#bfef45",
+        "#469990",
+        "#9A6324",
+        "#800000",
+        "#000075",
+        "#808000",
+        "#a9a9a9",
+    ]
+
+    base_by_group: dict[str, str] = {}
+    for i, g in enumerate(groups):
+        if i < len(_VIVID_BASE_COLORS):
+            base_by_group[g] = _VIVID_BASE_COLORS[i]
+        else:
+            h = (i * 137.508) % 360.0
+            base_by_group[g] = _hsl_to_hex(h, s=92.0, l=42.0)
+
+    def _chip_svg(base_hex: str, shape: str) -> str:
+        fill = esc(base_hex)
+        if shape == "circle":
+            body = "<circle cx='7' cy='7' r='5.4' />"
+        elif shape == "square":
+            body = "<rect x='2' y='2' width='10' height='10' rx='1.6' ry='1.6' />"
+        elif shape == "triangle":
+            body = "<polygon points='7,1.8 12.4,11.8 1.6,11.8' />"
+        elif shape == "diamond":
+            body = "<polygon points='7,1.6 12.4,7 7,12.4 1.6,7' />"
+        elif shape == "hex":
+            body = "<polygon points='7,1.4 12.2,4.3 12.2,9.7 7,12.6 1.8,9.7 1.8,4.3' />"
+        else:
+            body = "<polygon points='7,1.2 8.7,5.3 13.1,5.6 9.7,8.4 10.8,12.7 7,10.4 3.2,12.7 4.3,8.4 0.9,5.6 5.3,5.3' />"
+        return (
+            "<svg class='chip' width='14' height='14' viewBox='0 0 14 14' aria-hidden='true' focusable='false'>"
+            f"<g fill='{fill}' stroke='#111' stroke-width='1.2'>{body}</g>"
+            "</svg>"
+        )
+
+    def team_block(team: Team) -> str:
+        name = team.name or ""
+        g = _team_group_key(name)
+        base_hex = base_by_group.get(g, "#777777")
+        shape = shapes[group_index.get(g, 0) % len(shapes)]
+        chip = _chip_svg(base_hex, shape)
+        members = members_for(name, team.members)
+        members_html = f"<div class='members'>{esc(members)}</div>" if (include_members and members) else ""
+        # Border color prints reliably (even when background graphics is OFF).
+        return (
+            f"<div class='team' style='border-left-color:{esc(base_hex)}'>"
+            f"{chip}<div class='name'>{esc(name)}</div>{members_html}</div>"
+        )
+
+    def card_html(m: Match) -> str:
+        start = fmt_time(m.start_time)
+        end = fmt_end(m.start_time)
+        meta = f"第{m.round_num}試合 / {start}-{end} / コート{m.court}"
+        return (
+            "<article class='card'>"
+            f"<header class='meta'>{esc(meta)}</header>"
+            "<div class='teams'>"
+            f"{team_block(m.team1)}"
+            f"{team_block(m.team2)}"
+            "</div>"
+            "<div class='score'>"
+            "<span class='label'>得点</span>"
+            "<span class='blank'></span><span class='sep'>:</span><span class='blank'></span>"
+            "</div>"
+            "</article>"
+        )
+
+    with path.open("w", encoding="utf-8") as fh:
+        fh.write("<!DOCTYPE html><html lang='ja'><head><meta charset='utf-8'>")
+        fh.write("<meta name='viewport' content='width=device-width, initial-scale=1'>")
+        fh.write(f"<title>{escape(title)}</title>")
+        fh.write(
+            """
+<style>
+body {font-family: system-ui, sans-serif; margin: 12px; color: #111;}
+h1 {margin: 0 0 10px; font-size: 18px;}
+.note {margin: 0 0 12px; font-size: 12px; color: #333;}
+
+.columns {column-count: var(--cols); column-gap: 10mm;}
+.card {break-inside: avoid; border: 2px solid #111; border-radius: 6px; padding: 6mm 6mm 5mm; margin: 0 0 8mm;}
+.meta {font-size: 12.5px; font-weight: 800; margin: 0 0 5mm;}
+
+.teams {display: grid; gap: 4mm;}
+.team {border-left: 8px solid #777; padding-left: 4mm; display: grid; grid-template-columns: 16px 1fr; column-gap: 3mm; align-items: start;}
+.chip {margin-top: 1px;}
+.name {font-size: 18px; font-weight: 900; line-height: 1.15; word-break: break-word; overflow-wrap: anywhere;}
+.members {grid-column: 2 / 3; font-size: 14px; font-weight: 700; color: #222; margin-top: 1mm; word-break: break-word; overflow-wrap: anywhere;}
+
+.score {margin-top: 6mm; display: flex; align-items: baseline; gap: 4mm;}
+.score .label {font-size: 13px; font-weight: 900;}
+.score .blank {flex: 1 1 auto; border-bottom: 3px solid #111; min-width: 24mm; height: 8mm;}
+.score .sep {font-size: 16px; font-weight: 900;}
+
+@media print {
+  @page { size: A4; margin: 7mm; }
+  body { margin: 0; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  h1, .note { display: none; }
+  .columns { column-gap: 7mm; }
+  .card { margin: 0 0 6mm; }
+}
+</style>
+            """
+        )
+        fh.write(f"</head><body style='--cols:{int(columns)}'>")
+        fh.write(f"<h1>{escape(title)}</h1>")
+        fh.write(
+            "<p class='note'><strong>印刷の倍率（Scale）を確認/調整してください（例: 100%）。</strong><br>"
+            "カード式（縦長）なのでPDF化して壁貼りしやすいです。各試合につき得点欄は1行です。</p>"
+        )
+        fh.write("<div class='columns'>")
+        for m in ms:
+            fh.write(card_html(m))
+        fh.write("</div>")
+        fh.write("</body></html>")
+
+
 def write_wall_schedule_html(
     matches: List[Match],
     output_path: str,

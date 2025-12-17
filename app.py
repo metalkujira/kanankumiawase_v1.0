@@ -1,11 +1,18 @@
 from __future__ import annotations
 
 import io
+import sys
 import tempfile
 import zipfile
 from pathlib import Path
 
 import streamlit as st
+
+# Prefer workspace sources (src/) over any stale installed package.
+_ROOT = Path(__file__).resolve().parent
+_SRC = _ROOT / "src"
+if _SRC.exists() and str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
 from badminton_program import scheduler
 
@@ -117,6 +124,19 @@ with st.sidebar:
     st.markdown("#### 追加出力（任意）")
     gen_wall_html = st.checkbox("壁貼り用HTMLも出力", value=True, key="gen_wall_html")
     gen_wall_cpp = st.selectbox("壁貼り用: 1ページあたりコート数", options=[1, 2, 3], index=2, key="gen_wall_cpp")
+    gen_wall_cell_bg = st.checkbox(
+        "壁貼り(一覧表): チームセルの背景も塗る（印刷で背景ON推奨）",
+        value=False,
+        key="gen_wall_cell_bg",
+    )
+    gen_wall_cards = st.checkbox("壁貼り(カード式/PDF向け)も出力", value=False, key="gen_wall_cards")
+    gen_wall_cards_cols = st.selectbox(
+        "壁貼り(カード式): 列数（4/5列）",
+        options=[4, 5],
+        index=0,
+        key="gen_wall_cards_cols",
+        disabled=(not bool(gen_wall_cards)),
+    )
     gen_score_sheets = st.checkbox("得点記入表HTMLも出力", value=True, key="gen_score_sheets")
     gen_score_per_page = st.number_input(
         "得点記入表: 1枚あたりの枚数",
@@ -162,6 +182,17 @@ with st.sidebar:
     st.markdown("#### 追加出力（任意）")
     regen_wall_html = st.checkbox("壁貼り用HTMLも出力", value=True)
     regen_wall_cpp = st.selectbox("壁貼り用: 1ページあたりコート数", options=[1, 2, 3], index=2)
+    regen_wall_cell_bg = st.checkbox(
+        "壁貼り(一覧表): チームセルの背景も塗る（印刷で背景ON推奨）",
+        value=False,
+    )
+    regen_wall_cards = st.checkbox("壁貼り(カード式/PDF向け)も出力", value=False)
+    regen_wall_cards_cols = st.selectbox(
+        "壁貼り(カード式): 列数（4/5列）",
+        options=[4, 5],
+        index=0,
+        disabled=(not bool(regen_wall_cards)),
+    )
     regen_score_sheets = st.checkbox("得点記入表HTMLも出力", value=True)
     regen_score_per_page = st.number_input("得点記入表: 1枚あたりの枚数", min_value=1, max_value=20, value=8, step=1)
     regen_score_columns = st.number_input("得点記入表: 列数", min_value=1, max_value=4, value=2, step=1)
@@ -206,12 +237,16 @@ def _set_last_outputs_full(
     wall_bytes: bytes | None = None,
     score_name: str | None = None,
     score_bytes: bytes | None = None,
+    wall_cards_name: str | None = None,
+    wall_cards_bytes: bytes | None = None,
 ) -> None:
     _set_last_outputs(excel_name=excel_name, excel_bytes=excel_bytes, html_name=html_name, html_bytes=html_bytes)
     st.session_state.last_wall_name = wall_name
     st.session_state.last_wall_bytes = wall_bytes
     st.session_state.last_score_name = score_name
     st.session_state.last_score_bytes = score_bytes
+    st.session_state.last_wall_cards_name = wall_cards_name
+    st.session_state.last_wall_cards_bytes = wall_cards_bytes
 
 
 def _set_regen_html(*, html_name: str, html_bytes: bytes, include_members: bool) -> None:
@@ -229,6 +264,8 @@ def _set_regen_outputs(
     include_members: bool,
     wall_name: str | None = None,
     wall_bytes: bytes | None = None,
+    wall_cards_name: str | None = None,
+    wall_cards_bytes: bytes | None = None,
     score_name: str | None = None,
     score_bytes: bytes | None = None,
 ) -> None:
@@ -237,6 +274,8 @@ def _set_regen_outputs(
     st.session_state.regen_excel_bytes = excel_bytes
     st.session_state.regen_wall_name = wall_name
     st.session_state.regen_wall_bytes = wall_bytes
+    st.session_state.regen_wall_cards_name = wall_cards_name
+    st.session_state.regen_wall_cards_bytes = wall_cards_bytes
     st.session_state.regen_score_name = score_name
     st.session_state.regen_score_bytes = score_bytes
 
@@ -301,6 +340,8 @@ if run:
 
                 wall_name = None
                 wall_bytes = None
+                wall_cards_name = None
+                wall_cards_bytes = None
                 if bool(gen_wall_html):
                     wall_path = safe_html_path.with_name(f"{safe_html_path.stem}_wall.html")
                     scheduler.write_wall_schedule_html(
@@ -311,9 +352,23 @@ if run:
                         start_time_hhmm=str(start_time),
                         round_minutes=int(round_minutes),
                         courts_per_page=int(gen_wall_cpp),
+                        cell_background=bool(gen_wall_cell_bg),
                     )
                     wall_name = wall_path.name
                     wall_bytes = _read_bytes(wall_path)
+
+                    if bool(gen_wall_cards):
+                        wall_cards_path = safe_html_path.with_name(f"{safe_html_path.stem}_wall_cards.html")
+                        scheduler.write_wall_cards_html(
+                            matches,
+                            teams,
+                            str(wall_cards_path),
+                            columns=int(gen_wall_cards_cols),
+                            include_members=bool(html_include_members),
+                            round_minutes=int(round_minutes),
+                        )
+                        wall_cards_name = wall_cards_path.name
+                        wall_cards_bytes = _read_bytes(wall_cards_path)
 
                 score_name = None
                 score_bytes = None
@@ -341,6 +396,8 @@ if run:
                 html_bytes=html_bytes,
                 wall_name=wall_name,
                 wall_bytes=wall_bytes,
+                wall_cards_name=wall_cards_name,
+                wall_cards_bytes=wall_cards_bytes,
                 score_name=score_name,
                 score_bytes=score_bytes,
             )
@@ -442,6 +499,8 @@ if 'regen' in locals() and regen:
 
                 wall_name = None
                 wall_bytes = None
+                wall_cards_name = None
+                wall_cards_bytes = None
                 if regen_wall_html:
                     wall_name = out_path.with_name(f"{out_path.stem}_wall.html").name
                     wall_path = tmp_dir / wall_name
@@ -453,8 +512,22 @@ if 'regen' in locals() and regen:
                         start_time_hhmm=str(start_time),
                         round_minutes=int(round_minutes),
                         courts_per_page=int(regen_wall_cpp),
+                        cell_background=bool(regen_wall_cell_bg),
                     )
                     wall_bytes = _read_bytes(wall_path)
+
+                    if bool(regen_wall_cards):
+                        wall_cards_name = out_path.with_name(f"{out_path.stem}_wall_cards.html").name
+                        wall_cards_path = tmp_dir / wall_cards_name
+                        scheduler.write_wall_cards_html(
+                            matches,
+                            teams,
+                            str(wall_cards_path),
+                            columns=int(regen_wall_cards_cols),
+                            include_members=bool(regen_include_members),
+                            round_minutes=int(round_minutes),
+                        )
+                        wall_cards_bytes = _read_bytes(wall_cards_path)
 
                 score_name = None
                 score_bytes = None
@@ -480,6 +553,8 @@ if 'regen' in locals() and regen:
                 include_members=bool(regen_include_members),
                 wall_name=wall_name,
                 wall_bytes=wall_bytes,
+                wall_cards_name=wall_cards_name,
+                wall_cards_bytes=wall_cards_bytes,
                 score_name=score_name,
                 score_bytes=score_bytes,
             )
@@ -505,6 +580,8 @@ if "last_excel_bytes" in st.session_state:
         bundle_files[str(st.session_state.last_html_name)] = st.session_state.last_html_bytes
     if st.session_state.get("last_wall_bytes") and st.session_state.get("last_wall_name"):
         bundle_files[str(st.session_state.last_wall_name)] = st.session_state.last_wall_bytes
+    if st.session_state.get("last_wall_cards_bytes") and st.session_state.get("last_wall_cards_name"):
+        bundle_files[str(st.session_state.last_wall_cards_name)] = st.session_state.last_wall_cards_bytes
     if st.session_state.get("last_score_bytes") and st.session_state.get("last_score_name"):
         bundle_files[str(st.session_state.last_score_name)] = st.session_state.last_score_bytes
 
@@ -553,6 +630,15 @@ if "last_excel_bytes" in st.session_state:
         else:
             st.caption("壁貼り用HTML: 未出力")
 
+        if st.session_state.get("last_wall_cards_bytes") and st.session_state.get("last_wall_cards_name"):
+            st.download_button(
+                "壁貼り(カード式)HTMLをダウンロード",
+                data=st.session_state.last_wall_cards_bytes,
+                file_name=st.session_state.last_wall_cards_name,
+                mime="text/html",
+                use_container_width=True,
+            )
+
     with col4:
         if st.session_state.get("last_score_bytes") and st.session_state.get("last_score_name"):
             st.download_button(
@@ -588,6 +674,8 @@ if st.session_state.get("regen_html_bytes") and st.session_state.get("regen_html
     regen_bundle_files[str(st.session_state.regen_html_name)] = st.session_state.regen_html_bytes
     if st.session_state.get("regen_wall_bytes") and st.session_state.get("regen_wall_name"):
         regen_bundle_files[str(st.session_state.regen_wall_name)] = st.session_state.regen_wall_bytes
+    if st.session_state.get("regen_wall_cards_bytes") and st.session_state.get("regen_wall_cards_name"):
+        regen_bundle_files[str(st.session_state.regen_wall_cards_name)] = st.session_state.regen_wall_cards_bytes
     if st.session_state.get("regen_score_bytes") and st.session_state.get("regen_score_name"):
         regen_bundle_files[str(st.session_state.regen_score_name)] = st.session_state.regen_score_bytes
     if regen_bundle_files:
@@ -614,6 +702,15 @@ if st.session_state.get("regen_html_bytes") and st.session_state.get("regen_html
             "壁貼り用HTMLをダウンロード",
             data=st.session_state.regen_wall_bytes,
             file_name=st.session_state.regen_wall_name,
+            mime="text/html",
+            use_container_width=True,
+        )
+
+    if st.session_state.get("regen_wall_cards_bytes") and st.session_state.get("regen_wall_cards_name"):
+        st.download_button(
+            "壁貼り(カード式)HTMLをダウンロード",
+            data=st.session_state.regen_wall_cards_bytes,
+            file_name=st.session_state.regen_wall_cards_name,
             mime="text/html",
             use_container_width=True,
         )
